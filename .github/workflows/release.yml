@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    environment: crates
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$(git rev-parse HEAD)"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy,rustfmt
+
+      - name: Verify package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "axum-observability") | .version')"
+          test "v$version" = "$RELEASE_TAG"
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --all-features --no-deps
+
+      - name: Verify package
+        run: |
+          cargo package --locked
+          cargo publish --dry-run --locked
+
+      - name: Authenticate to crates.io
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1.0.5
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish --locked
