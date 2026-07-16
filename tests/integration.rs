@@ -2,6 +2,8 @@
 
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
+    future::{Ready, ready},
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
@@ -110,6 +112,24 @@ fn subscriber(config: &ObservabilityConfig, capture: Capture) -> impl tracing::S
 
 async fn context_handler(context: RequestContext) -> String {
     format!("{}|{}", context.request_id(), context.correlation_id())
+}
+
+#[derive(Clone)]
+struct SynchronousLoggingService;
+
+impl Service<Request<Body>> for SynchronousLoggingService {
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _request: Request<Body>) -> Self::Future {
+        tracing::warn!("synchronous service call");
+        ready(Ok(Response::new(Body::empty())))
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -386,6 +406,60 @@ impl HttpBody for FailingBody {
     }
 }
 
+struct FinalFrameBody(Option<Bytes>);
+
+impl HttpBody for FinalFrameBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(self.0.take().map(|bytes| Ok(Frame::data(bytes))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                Response::new(Body::new(FinalFrameBody(Some(Bytes::from_static(
+                    b"final",
+                )))))
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    assert!(capture.records().is_empty());
+
+    let mut body = response.into_body();
+    let frame = body
+        .frame()
+        .await
+        .expect("final frame")
+        .expect("successful final frame");
+    assert_eq!(frame.into_data().expect("data frame"), "final");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].get("terminal_reason").is_none());
+    drop(body);
+    assert_eq!(capture.records().len(), 1);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn body_error_emits_once_with_controlled_error_information() {
     let config = ObservabilityConfig::default();
@@ -508,6 +582,80 @@ async fn filtered_request_span_does_not_remove_access_record_correlation() {
         "4bf92f3577b34da6a3ce929d0e0e4736"
     );
     assert_eq!(records[0]["logging.googleapis.com/trace_sampled"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_span_directive_preserves_correlation_and_rejects_late_spoofing() {
+    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let capture = Capture::default();
+    let filtered = config
+        .json_layer(capture.clone())
+        .with_filter(EnvFilter::new("warn,axum_observability::request=info"));
+    let _guard = tracing_subscriber::registry().with(filtered).set_default();
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                let span = tracing::Span::current();
+                span.record("request_id", "spoofed-request");
+                span.record("trace_id", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                tracing::warn!("handler warning");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "original-request")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .body(Body::empty())
+        .expect("request");
+
+    app.oneshot(request).await.expect("response");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["request_id"], "original-request");
+        assert_eq!(record["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(
+            record["logging.googleapis.com/trace"],
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_inner_service_events_are_inside_the_request_span() {
+    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let service = ObservabilityLayer::new(config).layer(SynchronousLoggingService);
+    let request = Request::builder()
+        .header("x-request-id", "sync-request")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .body(Body::empty())
+        .expect("request");
+
+    service.oneshot(request).await.expect("response");
+
+    let records = capture.records();
+    let event = records
+        .iter()
+        .find(|record| record["message"] == "synchronous service call")
+        .expect("synchronous event");
+    assert_eq!(event["request_id"], "sync-request");
+    assert_eq!(event["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(
+        event["logging.googleapis.com/trace"],
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -802,25 +950,24 @@ fn formatter_writes_each_ndjson_event_once() {
     assert_eq!(records[0]["answer"], 42);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn formatter_applies_late_records_on_package_request_spans() {
-    let config = ObservabilityConfig::default();
+#[test]
+fn gcp_uses_canonical_cloud_logging_severity_names() {
+    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
-    let span = tracing::info_span!(
-        target: "axum_observability::request",
-        "request",
-        request_id = tracing::field::Empty,
-        correlation_id = tracing::field::Empty,
-    );
-    span.record("request_id", "recorded-request");
-    span.record("correlation_id", "recorded-correlation");
-    span.in_scope(|| tracing::info!("late-record event"));
+
+    tracing::trace!("trace event");
+    tracing::debug!("debug event");
+    tracing::info!("info event");
+    tracing::warn!("warn event");
+    tracing::error!("error event");
 
     let records = capture.records();
-    let record = &records[0];
-    assert_eq!(record["request_id"], "recorded-request");
-    assert_eq!(record["correlation_id"], "recorded-correlation");
+    let severities = records
+        .iter()
+        .map(|record| record["severity"].as_str().expect("severity"))
+        .collect::<Vec<_>>();
+    assert_eq!(severities, ["DEBUG", "DEBUG", "INFO", "WARNING", "ERROR"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

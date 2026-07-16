@@ -51,13 +51,19 @@ pub fn parse_tracestate<'a>(values: impl IntoIterator<Item = &'a str>) -> Option
     }
 
     let mut seen = HashSet::new();
-    let members = combined.split(',').collect::<Vec<_>>();
+    let members = combined
+        .split(',')
+        .map(|member| member.trim_matches([' ', '\t']))
+        .filter(|member| !member.is_empty())
+        .collect::<Vec<_>>();
+    if members.is_empty() {
+        return None;
+    }
     if members.len() > 32 {
         return None;
     }
 
-    for raw_member in members {
-        let member = raw_member.trim_matches([' ', '\t']);
+    for member in &members {
         let (key, value) = member.split_once('=')?;
         if value.contains('=')
             || !is_valid_tracestate_key(key)
@@ -68,7 +74,7 @@ pub fn parse_tracestate<'a>(values: impl IntoIterator<Item = &'a str>) -> Option
         }
     }
 
-    Some(combined)
+    Some(members.join(","))
 }
 
 fn is_lower_hex(value: &[u8]) -> bool {
@@ -202,6 +208,24 @@ mod tests {
             .expect("trace")
             .with_tracestate(parse_tracestate(["vendor=value"]));
         assert_eq!(trace.tracestate(), Some("vendor=value"));
+    }
+
+    #[test]
+    fn accepts_and_omits_empty_tracestate_list_members() {
+        assert_eq!(
+            parse_tracestate([" , vendor=value,,\t", "tenant@system=opaque,"]),
+            Some("vendor=value,tenant@system=opaque".to_owned())
+        );
+        assert!(parse_tracestate([" , \t,"]).is_none());
+
+        let thirty_two_with_empty_members = format!(
+            ",{},,",
+            (0..32)
+                .map(|index| format!("k{index}=v"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_tracestate([thirty_two_with_empty_members.as_str()]).is_some());
     }
 
     #[test]

@@ -241,7 +241,10 @@ where
         .unwrap_or_default();
 
         request.extensions_mut().insert(request_context.clone());
-        let future = self.inner.call(request);
+        let future = {
+            let _entered = span.enter();
+            self.inner.call(request)
+        };
         let config = self.config.clone();
         let guard_span = span.clone();
         let guard = TerminalGuard::new(
@@ -581,8 +584,8 @@ impl HttpBody for ObservedBody {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let this = self.project();
-        match this.body.poll_frame(context) {
+        let mut this = self.project();
+        match this.body.as_mut().poll_frame(context) {
             Poll::Ready(None) => {
                 this.guard.finish(None, None);
                 Poll::Ready(None)
@@ -592,7 +595,13 @@ impl HttpBody for ObservedBody {
                     .finish(Some("body_error"), Some("response body failed".to_owned()));
                 Poll::Ready(Some(Err(error)))
             }
-            other => other,
+            Poll::Ready(Some(Ok(frame))) => {
+                if this.body.is_end_stream() {
+                    this.guard.finish(None, None);
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 

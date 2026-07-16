@@ -55,21 +55,6 @@ where
         }
     }
 
-    fn on_record(
-        &self,
-        id: &tracing::span::Id,
-        values: &tracing::span::Record<'_>,
-        context: Context<'_, S>,
-    ) {
-        if let Some(span) = context.span(id)
-            && let Some(fields) = span.extensions_mut().get_mut::<RequestSpanFields>()
-        {
-            let mut visitor = JsonVisitor::default();
-            values.record(&mut visitor);
-            fields.0.extend(visitor.fields);
-        }
-    }
-
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
@@ -113,7 +98,7 @@ where
         };
         output.insert(
             level_key.to_owned(),
-            Value::String(event.metadata().level().as_str().to_owned()),
+            Value::String(level_name(*event.metadata().level(), self.preset).to_owned()),
         );
 
         if let Some(Value::Object(record)) = access_record {
@@ -133,6 +118,19 @@ where
         line.push(b'\n');
         let mut writer = self.writer.make_writer_for(event.metadata());
         let _ = writer.write_all(&line);
+    }
+}
+
+fn level_name(level: tracing::Level, preset: Preset) -> &'static str {
+    if preset != Preset::Gcp {
+        return level.as_str();
+    }
+
+    match level {
+        tracing::Level::TRACE | tracing::Level::DEBUG => "DEBUG",
+        tracing::Level::INFO => "INFO",
+        tracing::Level::WARN => "WARNING",
+        tracing::Level::ERROR => "ERROR",
     }
 }
 

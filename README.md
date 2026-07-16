@@ -168,8 +168,10 @@ mutate outbound trace headers.
 ## Log contract
 
 Every JSON event produced by `JsonLayer` contains `timestamp`, `target`, and
-`level` (`severity` on GCP). Events that record a message keep it under
-`message`. Typed `tracing` fields remain JSON numbers, booleans, and strings.
+`level` (`severity` on GCP). GCP maps `TRACE` and `DEBUG` to `DEBUG`, and `WARN`
+to Cloud Logging's canonical `WARNING`; `INFO` and `ERROR` are unchanged.
+Events that record a message keep it under `message`. Typed `tracing` fields
+remain JSON numbers, booleans, and strings.
 Application errors recorded through `tracing::field::Visit::record_error` use
 their display text.
 
