@@ -37,7 +37,7 @@ uuid = { version = "=1.24.0", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.4"
-tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "=1.52.4", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.0", features = ["catch-panic", "cors", "limit", "timeout"] }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "registry"] }
