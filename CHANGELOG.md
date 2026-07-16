@@ -12,8 +12,13 @@ All notable changes to this project are documented here. The format is based on
 
 - Request ID validation, generation, request extensions, and response headers.
 - Strict inbound W3C trace-context correlation.
-- One terminal access record covering response completion, error, and drop.
+- One terminal access record covering response completion, already-ended
+  bodies, streaming errors, service errors, and early drop.
 - Composable JSON logging with Default, Google Cloud, AWS, and Azure presets.
+- Filter-independent correlation fields on terminal records and exact bare GCP
+  trace IDs from validated W3C context.
+- Route operation IDs through Axum response extensions, with pre-seeded request
+  extensions retained as a fallback.
 - Runnable examples, package validation, CI, mutation testing, and fuzz targets.
 
 ## [0.1.0] - 2026-07-16

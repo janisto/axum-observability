@@ -1,69 +1,90 @@
-# AGENTS.md
+# Repository instructions
 
-Instructions for coding agents working in this repository. Keep `README.md`
-human-facing; implementation workflow and validation policy belong here.
+## Documentation
 
-## Engineering priorities
-
-- Inspect the relevant implementation, callers, and tests before changing
-  behavior. Prefer the smallest safe change.
-- State the failure mode before architectural, security, or production-impacting
-  changes.
-- Preserve `#![forbid(unsafe_code)]`. Use safe body projection and stable
-  `tracing-subscriber` APIs.
-- Do not add OpenTelemetry, a cloud SDK, a global subscriber, or logging of
-  queries, bodies, credentials, cookies, or arbitrary headers.
-- Keep the public layer type stable. Avoid public traits and generic callback
-  types unless a measured need justifies them.
+- `README.md` is primarily for human users and contributors. Keep installation,
+  usage, public API, and operational guidance there.
+- Put instructions needed specifically by coding agents in `AGENTS.md`. When
+  agent-specific guidance changes, update this file rather than adding it to
+  `README.md`.
 - Keep `plans/` ignored. Planning status is local and must not ship in the crate
   or repository.
 
-## Behavioral invariants
+## Engineering changes
 
-- Request IDs are 1–128 ASCII URI-unreserved characters. Custom policy may
-  narrow but cannot weaken that baseline; failure always falls back to a safe
-  package-generated ID.
-- Only one valid `traceparent` is trusted. Invalid `tracestate` is discarded
-  without invalidating a valid parent.
-- The response body guard emits exactly one terminal record on EOF, error, or
-  early drop. Response headers are not completion.
-- Package request-span fields override colliding event fields. Provider fields
-  are derived only from validated context.
-- Access paths never contain the query string. Remote IP comes only from Axum
-  `ConnectInfo`, never forwarded headers.
+- Inspect the relevant implementation, callers, and existing tests before
+  editing.
+- Prefer the smallest safe change that solves the problem.
+- Reuse existing patterns and utilities, refactoring them when needed, instead
+  of creating parallel abstractions or adding dependencies.
+- Preserve `#![forbid(unsafe_code)]` and use stable Rust APIs.
+- Do not add OpenTelemetry, a cloud SDK, a global subscriber, or logging of
+  queries, bodies, credentials, cookies, arbitrary headers, or forwarded IPs.
+
+## Public API and documentation
+
+- Update applicable tests, README content, examples, rustdoc, and changelog
+  entries when public behavior changes.
+- Keep `CHANGELOG.md` in Keep a Changelog format with an `Unreleased` section,
+  ISO-dated bracketed versions, applicable change categories, and comparison
+  links.
+- Keep examples minimal, runnable, and aligned with the documented API.
+- Treat exported APIs, structured log fields, defaults, and supported runtime
+  versions as compatibility contracts.
+- Document breaking changes explicitly and provide migration guidance when
+  applicable.
+
+## Pull requests
+
+- Use `<type>[optional scope]: <description>` for the title. Prefer no scope;
+  include one only when it materially improves clarity.
+- Example: `fix: preserve terminal correlation`.
+- Use `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`,
+  or `revert` as the type.
+- Keep each pull request focused. In the body, explain why the change is needed,
+  what changed, how it was validated, and any remaining risk.
+- Before opening a pull request, add applicable user-visible changes under
+  `CHANGELOG.md` -> `[Unreleased]`. Skip entries for changes without meaningful
+  user impact.
+- Keep the title suitable for the final squash or merge commit.
+
+## Commits
+
+- Follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+- Prefer no scope; include one only when it materially improves clarity. Write a
+  short, imperative description.
+- Example: `fix: preserve request ID`.
+- Mark breaking changes with `!` and explain them in a `BREAKING CHANGE:` footer.
+- Before committing, run `just qa` and `git diff --check`.
+- Run `just package-check` when package contents or release metadata change.
 
 ## Tests
 
-Use `.agents/skills/adversarial-testing/SKILL.md` whenever tests are planned,
-created, reviewed, or debugged. Prioritize parser boundaries, duplicate input,
-off-by-one status mapping, streaming completion, cancellation/drop, reserved
-field collisions, and forbidden sensitive output. Assert parsed JSON types and
-nested shapes rather than substrings alone.
+- Use the repository's `$adversarial-testing` skill when creating, updating, or
+  reviewing tests.
+- Test observable behavior, parser boundaries, failure recovery, cancellation,
+  one-shot terminal effects, and forbidden sensitive output. Do not optimize
+  for coverage numbers or mock interactions alone.
+- Run `just mutation` when changing production logic or its focused tests. Add
+  tests for meaningful surviving mutants, not equivalent transformations.
+- Keep mutation testing separate from `just fuzz`, which mutates parser inputs
+  rather than production code and requires a Rust nightly toolchain.
+- Never commit generated coverage, mutation, fuzz, or package artifacts.
 
-Run focused tests first, then the repository gate:
+## Releases
 
-```bash
-just fmt-check
-just lint
-just test
-just test-doc
-just qa
-just package-check
-```
-
-Mutation and fuzzing are explicit campaigns and are not part of `just qa`.
-Never commit `mutants.out/`, generated fuzz corpora, coverage output, or package
-artifacts. `just fuzz` requires an installed Rust nightly toolchain because
-libFuzzer sanitizer instrumentation uses unstable compiler flags.
-
-## Dependencies and releases
-
-- Rust 1.96.1, edition 2024, and Axum 0.8.9 are the v0.1 baseline.
-- Keep `Cargo.lock` checked in. Change it only through Cargo.
-- Every runtime dependency must serve a concrete crate behavior. Prefer the
-  standard library and existing dependencies.
-- Before release, run `just qa`, `just package-check`, `just audit`, and
-  `cargo publish --dry-run --locked` from the exact reviewed commit.
-- v0.2.0 is the first functional release and is published before any
-  `axum-playground` integration. The playground must consume exact version
-  `=0.2.0`; do not use a path dependency first.
+- Prepare releases through a pull request titled `chore: prepare vX.Y.Z`.
+- Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, rustdoc, examples, and public
+  documentation together when applicable.
+- Run `just qa`, `just package-check`, `cargo publish --dry-run --locked`,
+  `actionlint .github/workflows/ci.yml .github/workflows/release.yml`, and
+  `git diff --check`.
+- Merge a green pull request to `main`, then release the exact reviewed commit
+  with an annotated tag `vX.Y.Z`.
+- When drafting a stable GitHub Release, use **Generate release notes** and mark
+  it as **Latest**. Edit the generated notes for accuracy and alignment with
+  `CHANGELOG.md` before publishing.
+- Never move an existing release tag or reuse a published crates.io version.
+- Verify the GitHub Release, crates.io metadata and archive, docs.rs, and a fresh
+  registry-backed consumer after publishing.
+- Follow `RELEASE.md` for trusted publishing and recovery procedures.
