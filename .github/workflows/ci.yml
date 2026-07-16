@@ -72,7 +72,7 @@ jobs:
       - run: cargo audit
 
   coverage:
-    name: Branch coverage
+    name: Source coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
@@ -86,8 +86,11 @@ jobs:
             ~/.cargo/git
             target
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-coverage
-      - run: cargo install --locked cargo-llvm-cov --version 0.8.7
-      - run: cargo llvm-cov --locked --all-features --workspace --branch --lcov --output-path coverage.lcov
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+      - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage.lcov
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: coverage-lcov
