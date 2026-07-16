@@ -1,0 +1,148 @@
+# Examples
+
+This guide shows how to wire `axum-observability` into Axum services while
+keeping one log contract across Google Cloud, provider-neutral, AWS, and Azure
+deployments.
+
+When one configuration is shown, this project uses GCP as the canonical
+example. The other examples remain first-class and are compiled by the test
+suite.
+
+| Example | Purpose |
+| --- | --- |
+| [`examples/gcp.rs`](examples/gcp.rs) | Canonical Google Cloud Logging field shape. |
+| [`examples/basic.rs`](examples/basic.rs) | Generic JSON for local or provider-neutral pipelines. |
+| [`examples/aws.rs`](examples/aws.rs) | CloudWatch-friendly JSON and a derived X-Ray trace ID. |
+| [`examples/azure.rs`](examples/azure.rs) | Azure Monitor and Application Insights operation fields. |
+| [`examples/local_wrapper.rs`](examples/local_wrapper.rs) | Optional application-owned configuration helper. |
+
+## Core wiring
+
+Every service follows the same shape:
+
+1. Create one `ObservabilityConfig` and select its preset.
+2. Install `config.json_layer(writer)` on the application's existing
+   `tracing-subscriber` registry.
+3. Add `ObservabilityLayer` outside response-producing middleware so it can
+   observe the final status and response body.
+4. Use ordinary `tracing` events in handlers and services.
+
+The canonical GCP wiring is:
+
+```rust
+use axum::{Router, routing::get};
+use axum_observability::{ObservabilityConfig, ObservabilityLayer, Preset};
+use tracing_subscriber::prelude::*;
+
+let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+
+tracing_subscriber::registry()
+    .with(config.json_layer(std::io::stdout))
+    .init();
+
+let app = Router::new()
+    .route("/health", get(|| async { "ok" }))
+    .layer(ObservabilityLayer::new(config));
+# let _: Router = app;
+```
+
+No Google Cloud project ID is required. With valid W3C context,
+`logging.googleapis.com/trace` is the exact bare 32-character trace ID.
+
+## Run the canonical GCP example
+
+```bash
+cargo run --example gcp
+```
+
+The repository examples build a router and exit; they demonstrate package
+wiring without choosing an application's listener, shutdown, or deployment
+policy. The same examples are compiled by `cargo test --all-targets`.
+
+For a request carrying:
+
+```text
+X-Request-ID: demo-123
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+tracestate: vendor=value
+```
+
+the request ID remains `demo-123`, while `correlation_id` becomes the W3C trace
+ID. Handler events and the terminal access record share the correlation fields
+when the request span is enabled. The access record also includes a structured
+`httpRequest` object.
+
+Representative GCP fields:
+
+```json
+{"severity":"INFO","message":"request completed","request_id":"demo-123","correlation_id":"4bf92f3577b34da6a3ce929d0e0e4736","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace_sampled":true,"method":"GET","path":"/health","path_template":"/health","status":200}
+```
+
+The crate does not create spans for a tracing backend and therefore does not
+manufacture `logging.googleapis.com/spanId` from the incoming parent ID.
+
+## Provider-neutral JSON
+
+```bash
+cargo run --example basic
+```
+
+The default preset writes `level` and generic correlation fields without
+provider-specific aliases.
+
+## AWS
+
+```bash
+cargo run --example aws
+```
+
+The AWS preset keeps flat JSON. A valid W3C trace ID is also formatted as
+`xray_trace_id`, for example
+`1-4bf92f35-77b34da6a3ce929d0e0e4736`. The crate does not create X-Ray segments
+or parse `X-Amzn-Trace-Id`.
+
+## Azure
+
+```bash
+cargo run --example azure
+```
+
+The Azure preset maps valid W3C values to `operation_Id` and
+`operation_ParentId`. It does not initialize an Azure SDK or parse legacy
+`Request-Id` headers.
+
+## Optional local wrapper
+
+[`examples/local_wrapper.rs`](examples/local_wrapper.rs) demonstrates a
+project-owned function that returns the application's standard configuration.
+It narrows accepted request IDs and selects a custom correlation header while
+retaining the crate's baseline validation and safe fallback.
+
+Keep wrappers local when they encode application policy. The crate deliberately
+does not add a second logging facade around `tracing`.
+
+## Per-project checklist
+
+- Use Rust 1.96.1 or newer.
+- Use GCP when documentation needs one representative configuration.
+- Initialize the subscriber once at process startup, never in request code or a
+  library.
+- Keep `ObservabilityLayer` outside panic recovery, timeout, CORS, and body-limit
+  middleware whose final responses must be recorded.
+- Keep `axum_observability::request=info` enabled when application events need
+  request-span correlation; terminal access records carry their own correlation
+  fields even when that span is filtered.
+- Group logs by `path_template`, not the concrete request path.
+- Configure trusted proxy handling before inserting `ConnectInfo<SocketAddr>`;
+  the crate never trusts forwarded headers itself.
+- Keep provider tracing SDKs separate from this correlation crate.
+- Never place secrets or raw bodies in application log or enrichment fields.
+- Run `just qa` and `just package-check` before release.
+
+## References
+
+- [Axum middleware](https://docs.rs/axum/latest/axum/middleware/index.html)
+- [tracing-subscriber filtering](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+- [Google Cloud: Link log entries with traces](https://docs.cloud.google.com/trace/docs/trace-log-integration)
+- [Google Cloud structured logging](https://docs.cloud.google.com/logging/docs/structured-logging)
+- [W3C Trace Context](https://www.w3.org/TR/trace-context/)
