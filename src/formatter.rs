@@ -127,10 +127,12 @@ where
         }
         add_provider_trace_fields(&mut output, self.preset);
 
+        let Ok(mut line) = serde_json::to_vec(&output) else {
+            return;
+        };
+        line.push(b'\n');
         let mut writer = self.writer.make_writer_for(event.metadata());
-        if serde_json::to_writer(&mut writer, &output).is_ok() {
-            let _ = writer.write_all(b"\n");
-        }
+        let _ = writer.write_all(&line);
     }
 }
 
@@ -187,11 +189,7 @@ fn copy_as(
 }
 
 fn add_provider_trace_fields(output: &mut Map<String, Value>, preset: Preset) {
-    let Some(trace_id) = output
-        .get("trace_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
+    let Some(trace_id) = validated_trace_id(output) else {
         return;
     };
     match preset {
@@ -218,6 +216,17 @@ fn add_provider_trace_fields(output: &mut Map<String, Value>, preset: Preset) {
             }
         }
     }
+}
+
+fn validated_trace_id(output: &Map<String, Value>) -> Option<String> {
+    let trace_id = output.get("trace_id")?.as_str()?;
+    let bytes = trace_id.as_bytes();
+    (bytes.len() == 32
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        && bytes.iter().any(|byte| *byte != b'0'))
+    .then(|| trace_id.to_owned())
 }
 
 fn is_request_field(key: &str) -> bool {

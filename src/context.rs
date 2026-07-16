@@ -118,7 +118,8 @@ impl RequestContext {
     }
 }
 
-/// Stable application operation name attached to request extensions.
+/// Stable application operation name attached to request or response
+/// extensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationId(String);
 

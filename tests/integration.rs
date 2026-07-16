@@ -14,7 +14,7 @@ use std::{
 };
 
 use axum::{
-    Router,
+    Extension, Router,
     body::{Body, Bytes},
     extract::ConnectInfo,
     http::{HeaderValue, Request, Response, StatusCode},
@@ -29,7 +29,9 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::{Layer, Service, ServiceExt};
 use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    Layer as SubscriberLayer, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -66,6 +68,39 @@ impl Capture {
             .lines()
             .map(|line| serde_json::from_str(line).expect("line is JSON"))
             .collect()
+    }
+}
+
+#[derive(Clone, Default)]
+struct CountingCapture {
+    capture: Capture,
+    writes: Arc<AtomicUsize>,
+}
+
+struct CountingWriter {
+    capture: CaptureWriter,
+    writes: Arc<AtomicUsize>,
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.capture.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.capture.flush()
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CountingCapture {
+    type Writer = CountingWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        CountingWriter {
+            capture: CaptureWriter(self.capture.0.clone()),
+            writes: self.writes.clone(),
+        }
     }
 }
 
@@ -207,6 +242,10 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         assert_eq!(record["request_id"], "request-42");
         assert_eq!(record["correlation_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(record["severity"], "INFO");
+        assert_eq!(
+            record["logging.googleapis.com/trace"],
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
         assert_eq!(record["logging.googleapis.com/trace_sampled"], true);
     }
     assert_eq!(records[0]["message"], "application event");
@@ -264,7 +303,10 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
-        .route("/", get(|| async { StatusCode::IM_A_TEAPOT }))
+        .route(
+            "/",
+            get(|| async { (StatusCode::IM_A_TEAPOT, "response body") }),
+        )
         .layer(ObservabilityLayer::new(config));
     let response = app
         .oneshot(Request::new(Body::empty()))
@@ -279,6 +321,30 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
     assert_eq!(records[0]["level"], "WARN");
     assert_eq!(records[0]["duration_ms"], 0.0);
     assert!(records[0].get("terminal_reason").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn already_ended_body_finishes_before_exposing_eof() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { Body::empty() }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+
+    assert!(response.body().is_end_stream());
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], 200);
+    assert!(records[0].get("terminal_reason").is_none());
+
+    drop(response);
+    assert_eq!(capture.records().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -385,6 +451,63 @@ async fn cloud_presets_emit_exact_provider_trace_shapes() {
             assert_eq!(records[0]["operation_ParentId"], "00f067aa0ba902b7");
         }
     }
+}
+
+#[test]
+fn malformed_request_span_trace_id_does_not_panic_or_emit_aws_metadata() {
+    let config = ObservabilityConfig::default().with_preset(Preset::Aws);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let span = tracing::info_span!(
+        target: "axum_observability::request",
+        "request",
+        trace_id = "short",
+    );
+
+    span.in_scope(|| tracing::info!("application event"));
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["trace_id"], "short");
+    assert!(records[0].get("xray_trace_id").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filtered_request_span_does_not_remove_access_record_correlation() {
+    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let capture = Capture::default();
+    let filtered = config
+        .json_layer(capture.clone())
+        .with_filter(EnvFilter::new("warn"));
+    let _guard = tracing_subscriber::registry().with(filtered).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "request-500")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .body(Body::empty())
+        .expect("request");
+
+    app.oneshot(request).await.expect("response");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["severity"], "ERROR");
+    assert_eq!(records[0]["request_id"], "request-500");
+    assert_eq!(
+        records[0]["correlation_id"],
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+    assert_eq!(
+        records[0]["logging.googleapis.com/trace"],
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+    assert_eq!(records[0]["logging.googleapis.com/trace_sampled"], true);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -605,6 +728,34 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn response_operation_id_overrides_preseeded_request_operation_id() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                (
+                    Extension(OperationId::new("route-list-items")),
+                    StatusCode::NO_CONTENT,
+                )
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+    let mut request = Request::new(Body::empty());
+    request
+        .extensions_mut()
+        .insert(OperationId::new("preseeded-operation"));
+
+    app.oneshot(request).await.expect("response");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["operation_id"], "route-list-items");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn formatter_preserves_typed_application_fields_and_background_events() {
     let config = ObservabilityConfig::default();
     let capture = Capture::default();
@@ -632,6 +783,23 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
     assert!(record.get("severity").is_none());
     assert!(record["timestamp"].is_string());
     assert!(record.get("request_id").is_none());
+}
+
+#[test]
+fn formatter_writes_each_ndjson_event_once() {
+    let config = ObservabilityConfig::default();
+    let capture = CountingCapture::default();
+    let _guard = tracing_subscriber::registry()
+        .with(config.json_layer(capture.clone()))
+        .set_default();
+
+    tracing::info!(answer = 42_u64, ready = true, "buffered event");
+
+    assert_eq!(capture.writes.load(Ordering::SeqCst), 1);
+    let records = capture.capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message"], "buffered event");
+    assert_eq!(records[0]["answer"], 42);
 }
 
 #[tokio::test(flavor = "current_thread")]

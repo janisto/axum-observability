@@ -260,6 +260,9 @@ where
                     Ok(response) => {
                         let (mut parts, body) = response.into_parts();
                         guard.set_status(parts.status);
+                        if let Some(operation_id) = parts.extensions.get::<OperationId>() {
+                            guard.set_operation_id(operation_id);
+                        }
                         if config.response_header {
                             let value = HeaderValue::from_str(guard.request_id())
                                 .expect("validated request ID is always a header value");
@@ -269,7 +272,7 @@ where
                         }
                         Ok(Response::from_parts(
                             parts,
-                            Body::new(ObservedBody { body, guard }),
+                            Body::new(ObservedBody::new(body, guard)),
                         ))
                     }
                     Err(error) => {
@@ -390,6 +393,16 @@ fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> 
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AccessRecord {
+    request_id: String,
+    correlation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_flags: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_sampled: Option<bool>,
     method: String,
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -460,6 +473,12 @@ impl TerminalGuard {
         }
     }
 
+    fn set_operation_id(&mut self, operation_id: &OperationId) {
+        if let Some(state) = &mut self.state {
+            state.metadata.operation_id = Some(operation_id.as_str().to_owned());
+        }
+    }
+
     fn finish(&mut self, terminal_reason: Option<&str>, error: Option<String>) {
         let Some(state) = self.state.take() else {
             return;
@@ -467,7 +486,14 @@ impl TerminalGuard {
         let finished =
             catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
         let duration = finished.saturating_duration_since(state.started);
+        let trace = state.request_context.trace_context();
         let record = AccessRecord {
+            request_id: state.request_context.request_id().to_owned(),
+            correlation_id: state.request_context.correlation_id().to_owned(),
+            trace_id: trace.map(|trace| trace.trace_id().to_owned()),
+            parent_id: trace.map(|trace| trace.parent_id().to_owned()),
+            trace_flags: trace.map(TraceContext::flags),
+            trace_sampled: trace.map(TraceContext::sampled),
             method: state.metadata.method,
             path: state.metadata.path,
             path_template: state.metadata.path_template,
@@ -535,6 +561,15 @@ pin_project! {
         #[pin]
         body: Body,
         guard: TerminalGuard,
+    }
+}
+
+impl ObservedBody {
+    fn new(body: Body, mut guard: TerminalGuard) -> Self {
+        if body.is_end_stream() {
+            guard.finish(None, None);
+        }
+        Self { body, guard }
     }
 }
 

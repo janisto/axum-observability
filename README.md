@@ -121,7 +121,7 @@ Every terminal record has `message = "request completed"`, `method`, escaped
 `duration_ms`. It also includes these values when available:
 
 - `path_template` from Axum `MatchedPath`;
-- `operation_id` from an explicit `OperationId` request extension;
+- `operation_id` from an explicit `OperationId` request or response extension;
 - `remote_ip` from `ConnectInfo<SocketAddr>` only;
 - one unambiguous raw `user_agent`;
 - `terminal_reason` and controlled `error` for body errors, service errors, or
@@ -130,6 +130,22 @@ Every terminal record has `message = "request completed"`, `method`, escaped
 
 The default level mapping is `ERROR` for 5xx, `WARN` for 4xx, and `INFO` for all
 other statuses.
+
+Because observability wraps route middleware, route-specific operation IDs
+should be returned as an Axum response extension so the outer layer can observe
+them:
+
+```rust
+use axum::{Extension, http::StatusCode};
+use axum_observability::OperationId;
+
+async fn list_items() -> (Extension<OperationId>, StatusCode) {
+    (Extension(OperationId::new("list-items")), StatusCode::OK)
+}
+```
+
+An `OperationId` already present on the request before it reaches the
+observability layer remains supported. A response extension takes precedence.
 
 ## Presets
 
@@ -141,8 +157,9 @@ other statuses.
 - `Azure` adds `operation_Id` and `operation_ParentId`.
 
 Provider correlation fields are present only for validated W3C context. The GCP
-trace field contains the validated raw trace ID, matching the sibling package
-contract; deployment-side log routing may qualify it with a project name.
+trace field is always the bare validated 32-character trace ID. The crate never
+prepends `projects/{project}/traces/`; the bare trace ID is Google Cloud's
+current preferred format and matches the sibling package contract.
 
 ## Privacy boundary
 
