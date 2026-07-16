@@ -1,0 +1,136 @@
+name: Feature request
+description: Propose a well-scoped improvement to axum-observability
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should start with a concrete application need and explain how the result can be verified. Public API and log-schema changes carry compatibility costs even during the `v0.x` release line.
+
+        Before filing, search the existing issues and review the README and examples. If an existing feature already addresses the use case, explain the remaining gap.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched the existing issues and did not find a matching request.
+          required: true
+        - label: I reviewed the README, examples, and current public API relevant to this request.
+          required: true
+        - label: I removed secrets and sensitive data from everything I am submitting.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Select all areas the request is expected to affect.
+      multiple: true
+      options:
+        - Public API or layer configuration
+        - Request ID generation or response header
+        - Request-scoped tracing fields or request context
+        - Trace context parsing or correlation
+        - Access log fields, levels, or terminal body behavior
+        - Cloud preset or provider field formatting
+        - Axum routing, status, panic, timeout, streaming, or drop integration
+        - Crate packaging, Rust types, MSRV, or compatibility
+        - Performance or reliability
+        - Documentation or examples
+        - Other or uncertain
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or limitation
+      description: Describe the application need, who encounters it, and why the current behavior is insufficient. Focus on the problem before the implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Concrete use case
+      description: Show a realistic Axum/Tower workflow, request, structured log record, or code example that demonstrates the need.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired behavior and success criteria
+      description: Explain what should change and how maintainers can verify that the feature solves the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-design
+    attributes:
+      label: Proposed API or design
+      description: Optional. Sketch Rust signatures, configuration, log fields, layer/body behavior, or usage code if you have a concrete design.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: Describe existing Axum, Tower, or tracing APIs, application-level solutions, other crates, or designs you considered. If none are known, say so.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Compatibility assessment
+      description: Give your best assessment; selecting uncertain is acceptable.
+      options:
+        - Additive and backward compatible
+        - Changes existing API or behavior
+        - Uncertain
+    validations:
+      required: true
+
+  - type: textarea
+    id: operational-impact
+    attributes:
+      label: Operational and contract impact
+      description: Explain expected effects on public APIs, Rust types, log fields or schemas, layer ordering, privacy or security, performance, MSRV and Axum/Tower/tracing compatibility, dependencies, and cloud integrations. Write none or uncertain where appropriate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: Optional. State important boundaries and behavior this request should not add or change, including whether it should create or export traces, metrics, or profiles.
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Evidence and prior art
+      description: Link to specifications, Axum/Tower/tracing behavior, production evidence, or comparable implementations that support the request.
+
+  - type: textarea
+    id: ai-assistance
+    attributes:
+      label: Agent or AI assistance
+      description: Optional. If an AI agent helped research, design, validate, or write this request, include its surface, model and provider, reasoning or effort setting, agent or tool version, contribution, verification, and human review status. Use unknown when an exact value is unavailable. Do not include private prompts or transcripts.
+      placeholder: |
+        Agent or surface: Codex desktop
+        Model and provider: OpenAI GPT-5.6 Sol
+        Reasoning or effort: medium
+        Agent or tool version:
+        Contribution: researched, designed, validated, or drafted the request
+        Verification: sources, commands, and evidence checked
+        Human review: performed or not performed
+        Public transcript, run, or pull request:
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add any other constraints, examples, screenshots, or links relevant to evaluation.
