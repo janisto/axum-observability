@@ -86,15 +86,15 @@ jobs:
             ~/.cargo/git
             target
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-coverage
-      - uses: taiki-e/install-action@v2.83.3
-        with:
-          tool: cargo-llvm-cov@0.8.7
-          fallback: none
+      - run: cargo install --locked cargo-llvm-cov --version 0.8.7
       - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage.lcov
+      - run: cargo llvm-cov --locked --all-features --workspace --html
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: coverage-lcov
-          path: coverage.lcov
+          name: coverage-report
+          path: |
+            coverage.lcov
+            target/llvm-cov/html
           if-no-files-found: error
           retention-days: 7
 

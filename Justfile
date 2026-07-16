@@ -40,8 +40,15 @@ audit:
     cargo audit
 
 [group('qa')]
-coverage:
-    cargo llvm-cov --locked --all-features --workspace --branch --html
+coverage-lcov:
+    cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage.lcov
+
+[group('qa')]
+coverage-html:
+    cargo llvm-cov --locked --all-features --workspace --html
+
+[group('qa')]
+coverage: coverage-lcov coverage-html
 
 [group('qa')]
 package-check:
