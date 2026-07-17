@@ -19,7 +19,7 @@ suite.
 
 Every service follows the same shape:
 
-1. Create one `ObservabilityConfig` and select its preset.
+1. Create one `ObservabilityConfig` and select its field convention.
 2. Install `config.json_layer(writer)` on the application's existing
    `tracing-subscriber` registry.
 3. Add `ObservabilityLayer` outside response-producing middleware so it can
@@ -30,10 +30,10 @@ The canonical GCP wiring is:
 
 ```rust
 use axum::{Router, routing::get};
-use axum_observability::{ObservabilityConfig, ObservabilityLayer, Preset};
+use axum_observability::{ObservabilityConfig, ObservabilityLayer, FieldConvention};
 use tracing_subscriber::prelude::*;
 
-let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
 
 tracing_subscriber::registry()
     .with(config.json_layer(std::io::stdout))
@@ -51,12 +51,13 @@ No Google Cloud project ID is required. With valid W3C context,
 ## Check the canonical GCP configuration
 
 ```bash
-cargo check --locked --example gcp
+cargo run --quiet --example gcp
 ```
 
-The repository examples compile package configuration and router wiring without
-choosing an application's listener, shutdown, or deployment policy. The same
-examples are compiled by `cargo test --all-targets`.
+The example makes one in-process `/health` request without binding a listener.
+Its stdout is exactly two correlated application events followed by one
+terminal request event, each as one JSON object. The examples are also compiled
+by `cargo test --all-targets`.
 
 ## Expected request behavior
 
@@ -88,7 +89,7 @@ manufacture `logging.googleapis.com/spanId` from the incoming parent ID.
 cargo check --locked --example basic
 ```
 
-The default preset writes `level` and generic correlation fields without
+The default convention writes `level` and generic correlation fields without
 provider-specific aliases.
 
 ## AWS
@@ -97,7 +98,7 @@ provider-specific aliases.
 cargo check --locked --example aws
 ```
 
-The AWS preset keeps flat JSON. A valid W3C trace ID is also formatted as
+The AWS convention keeps flat JSON. A valid W3C trace ID is also formatted as
 `xray_trace_id`, for example
 `1-4bf92f35-77b34da6a3ce929d0e0e4736`. The crate does not create X-Ray segments
 or parse `X-Amzn-Trace-Id`.
@@ -108,7 +109,7 @@ or parse `X-Amzn-Trace-Id`.
 cargo check --locked --example azure
 ```
 
-The Azure preset maps valid W3C values to `operation_Id` and
+The Azure convention maps valid W3C values to `operation_Id` and
 `operation_ParentId`. It does not initialize an Azure SDK or parse legacy
 `Request-Id` headers.
 

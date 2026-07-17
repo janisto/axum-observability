@@ -1,11 +1,11 @@
 //! Azure-oriented structured logging setup.
 
 use axum::{Router, routing::get};
-use axum_observability::{ObservabilityConfig, ObservabilityLayer, Preset};
+use axum_observability::{FieldConvention, ObservabilityConfig, ObservabilityLayer};
 use tracing_subscriber::prelude::*;
 
 fn main() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Azure);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Azure);
     tracing_subscriber::registry()
         .with(config.json_layer(std::io::stdout))
         .init();

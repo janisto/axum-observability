@@ -17,6 +17,16 @@ impl RequestId {
     ///
     /// Returns the first deterministic baseline validation failure without
     /// retaining or echoing the rejected value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use axum_observability::RequestId;
+    ///
+    /// let request_id = RequestId::parse("request-42")?;
+    /// assert_eq!(request_id.as_str(), "request-42");
+    /// # Ok::<(), axum_observability::InvalidRequestId>(())
+    /// ```
     pub fn parse(value: &str) -> Result<Self, InvalidRequestId> {
         validate(value)?;
         Ok(Self(value.into()))

@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Reported redacted formatter failures without unwinding through request
+  handling or retrying failed event writes.
 - Canonicalized the configured request-ID header before downstream handling,
   used one validated `RequestId` across context, spans, logs, and responses,
   and accepted opaque W3C future-version `traceparent` extensions.
@@ -17,6 +19,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Replaced the pre-release API and log contracts with validated typed headers,
+  static operation IDs, `FieldConvention`, a nameable service and extractor
+  rejection, and privacy-preserving opt-in request metadata.
 - Relaxed dependency requirements across the supported Axum 0.8 line, reduced
   the default feature graph, and made peer-IP support an explicit `peer-ip`
   feature.

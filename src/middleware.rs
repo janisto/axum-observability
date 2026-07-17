@@ -28,7 +28,7 @@ use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::{
-    JsonLayer, OperationId, Preset, RequestContext, RequestId, TraceContext,
+    FieldConvention, JsonLayer, OperationId, RequestContext, RequestId, TraceContext,
     trace_context::{parse_traceparent, parse_tracestate},
 };
 
@@ -40,10 +40,19 @@ type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + 
 
 /// Configuration for [`ObservabilityLayer`].
 #[derive(Clone)]
+#[must_use]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent opt-in capture and response policies are explicit configuration"
+)]
 pub struct ObservabilityConfig {
-    pub(crate) preset: Preset,
+    pub(crate) field_convention: FieldConvention,
     request_id_header: HeaderName,
     response_header: bool,
+    raw_path: bool,
+    #[cfg(feature = "peer-ip")]
+    peer_ip: bool,
+    user_agent: bool,
     generator: Generator,
     validator: Validator,
     level_mapper: LevelMapper,
@@ -55,9 +64,11 @@ impl fmt::Debug for ObservabilityConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ObservabilityConfig")
-            .field("preset", &self.preset)
+            .field("field_convention", &self.field_convention)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
+            .field("raw_path", &self.raw_path)
+            .field("user_agent", &self.user_agent)
             .finish_non_exhaustive()
     }
 }
@@ -65,9 +76,13 @@ impl fmt::Debug for ObservabilityConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            preset: Preset::Default,
+            field_convention: FieldConvention::Generic,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
+            raw_path: false,
+            #[cfg(feature = "peer-ip")]
+            peer_ip: false,
+            user_agent: false,
             generator: Arc::new(|| Some(random_request_id())),
             validator: Arc::new(|_| true),
             level_mapper: Arc::new(default_level),
@@ -79,35 +94,76 @@ impl Default for ObservabilityConfig {
 
 impl ObservabilityConfig {
     /// Selects the provider field convention.
-    #[must_use]
-    pub fn with_preset(mut self, preset: Preset) -> Self {
-        self.preset = preset;
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_field_convention(mut self, convention: FieldConvention) -> Self {
+        self.field_convention = convention;
         self
     }
 
     /// Sets the request and response correlation header name.
     ///
-    /// # Errors
+    /// Use [`HeaderName::from_static`] for a known lowercase name, or
+    /// [`HeaderName::try_from`] when configuration supplies the value:
     ///
-    /// Returns an error when `name` is not a valid HTTP header name.
-    pub fn with_request_id_header(
-        mut self,
-        name: impl AsRef<str>,
-    ) -> Result<Self, axum::http::header::InvalidHeaderName> {
-        self.request_id_header = HeaderName::try_from(name.as_ref())?;
-        Ok(self)
+    /// ```
+    /// use axum::http::HeaderName;
+    /// use axum_observability::ObservabilityConfig;
+    ///
+    /// let static_config = ObservabilityConfig::default()
+    ///     .with_request_id_header(HeaderName::from_static("x-correlation-id"));
+    /// let dynamic_name = HeaderName::try_from("x-runtime-correlation-id")?;
+    /// let dynamic_config = ObservabilityConfig::default()
+    ///     .with_request_id_header(dynamic_name);
+    /// # let _ = (static_config, dynamic_config);
+    /// # Ok::<(), axum::http::header::InvalidHeaderName>(())
+    /// ```
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_request_id_header(mut self, name: HeaderName) -> Self {
+        self.request_id_header = name;
+        self
     }
 
     /// Enables or disables adding the request ID response header.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_response_header(mut self, enabled: bool) -> Self {
         self.response_header = enabled;
         self
     }
 
+    /// Enables or disables query-free raw path capture.
+    ///
+    /// Enabling this can record identifying data and changes the application's
+    /// privacy posture. Query strings are never captured.
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_raw_path(mut self, enabled: bool) -> Self {
+        self.raw_path = enabled;
+        self
+    }
+
+    /// Enables or disables capture of Axum's trusted socket peer extension.
+    ///
+    /// Enabling this can record identifying data and changes the application's
+    /// privacy posture. Forwarding headers are never inspected.
+    #[cfg(feature = "peer-ip")]
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_peer_ip(mut self, enabled: bool) -> Self {
+        self.peer_ip = enabled;
+        self
+    }
+
+    /// Enables or disables capture of one unambiguous text User-Agent value.
+    ///
+    /// Enabling this can record identifying data and changes the application's
+    /// privacy posture.
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_user_agent(mut self, enabled: bool) -> Self {
+        self.user_agent = enabled;
+        self
+    }
+
     /// Sets a fallible request ID generator. It is invoked once per replacement
     /// request before the crate falls back to a package-owned random identifier.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_generator(
         mut self,
         generator: impl Fn() -> Option<RequestId> + Send + Sync + 'static,
@@ -118,7 +174,7 @@ impl ObservabilityConfig {
 
     /// Adds a request ID validator that may narrow, but cannot weaken, the
     /// baseline URI-unreserved policy.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_validator(
         mut self,
         validator: impl Fn(&RequestId) -> bool + Send + Sync + 'static,
@@ -128,7 +184,7 @@ impl ObservabilityConfig {
     }
 
     /// Sets the mapping from final response status to access-event level.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_status_level_mapper(
         mut self,
         mapper: impl Fn(StatusCode) -> Level + Send + Sync + 'static,
@@ -142,7 +198,7 @@ impl ObservabilityConfig {
     /// Clock panics are contained when the application uses Rust's default
     /// `panic = "unwind"` behavior. Rust code cannot recover from
     /// `panic = "abort"`.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_clock(mut self, clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
         self.clock = Arc::new(clock);
         self
@@ -150,7 +206,7 @@ impl ObservabilityConfig {
 
     /// Adds controlled fields to terminal access records. Reserved package
     /// fields cannot be overwritten.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub fn with_access_enricher(
         mut self,
         enricher: impl Fn(&RequestContext) -> BTreeMap<String, Value> + Send + Sync + 'static,
@@ -159,10 +215,10 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Creates a composable JSON layer using this configuration's preset.
-    #[must_use]
+    /// Creates a composable JSON layer using this configuration's field convention.
+    #[must_use = "configuration builders return a new value"]
     pub fn json_layer<W>(&self, writer: W) -> JsonLayer<W> {
-        JsonLayer::new(writer, self.preset)
+        JsonLayer::new(writer, self.field_convention)
     }
 
     fn accepts_request_id(&self, value: &RequestId) -> bool {
@@ -183,13 +239,14 @@ impl ObservabilityConfig {
 
 /// Cloneable Tower layer that installs correlation and terminal access logs.
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ObservabilityLayer {
     config: ObservabilityConfig,
 }
 
 impl ObservabilityLayer {
     /// Creates a layer from an explicit configuration.
-    #[must_use]
+    #[must_use = "configuration builders return a new value"]
     pub const fn new(config: ObservabilityConfig) -> Self {
         Self { config }
     }
@@ -237,7 +294,7 @@ where
         let request_id = select_request_id(request.headers_mut(), &self.config);
         let trace_context = select_trace_context(request.headers());
         let request_context = RequestContext::new(request_id, trace_context);
-        let metadata = RequestMetadata::from_request(&request);
+        let metadata = RequestMetadata::from_request(&request, &self.config);
         let span = request_span(&request_context);
         let started = catch_unwind(AssertUnwindSafe(|| (self.config.clock)()))
             .unwrap_or_else(|_| Instant::now());
@@ -375,18 +432,18 @@ fn default_level(status: StatusCode) -> Level {
 #[derive(Debug)]
 struct RequestMetadata {
     method: String,
-    path: String,
+    path: Option<String>,
     path_template: Option<String>,
     operation_id: Option<String>,
-    remote_ip: Option<String>,
+    peer_ip: Option<String>,
     user_agent: Option<String>,
 }
 
 impl RequestMetadata {
-    fn from_request(request: &Request<Body>) -> Self {
+    fn from_request(request: &Request<Body>, config: &ObservabilityConfig) -> Self {
         Self {
             method: request.method().to_string(),
-            path: request.uri().path().to_owned(),
+            path: config.raw_path.then(|| request.uri().path().to_owned()),
             path_template: request
                 .extensions()
                 .get::<MatchedPath>()
@@ -395,14 +452,20 @@ impl RequestMetadata {
                 .extensions()
                 .get::<OperationId>()
                 .map(|operation| operation.as_str().to_owned()),
-            remote_ip: peer_ip(request),
-            user_agent: exactly_one_header(request.headers(), &USER_AGENT),
+            peer_ip: peer_ip(request, config),
+            user_agent: config
+                .user_agent
+                .then(|| exactly_one_header(request.headers(), &USER_AGENT))
+                .flatten(),
         }
     }
 }
 
 #[cfg(feature = "peer-ip")]
-fn peer_ip(request: &Request<Body>) -> Option<String> {
+fn peer_ip(request: &Request<Body>, config: &ObservabilityConfig) -> Option<String> {
+    if !config.peer_ip {
+        return None;
+    }
     request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -410,7 +473,7 @@ fn peer_ip(request: &Request<Body>) -> Option<String> {
 }
 
 #[cfg(not(feature = "peer-ip"))]
-fn peer_ip(_request: &Request<Body>) -> Option<String> {
+fn peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<String> {
     None
 }
 
@@ -433,7 +496,8 @@ pub(crate) struct AccessRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_sampled: Option<bool>,
     method: String,
-    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path_template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -442,7 +506,7 @@ pub(crate) struct AccessRecord {
     status: Option<u16>,
     duration_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    remote_ip: Option<String>,
+    peer_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -549,7 +613,7 @@ impl TerminalGuard {
             operation_id: state.metadata.operation_id,
             status: state.status.map(|status| status.as_u16()),
             duration_ms: duration.as_secs_f64() * 1_000.0,
-            remote_ip: state.metadata.remote_ip,
+            peer_ip: state.metadata.peer_ip,
             user_agent: state.metadata.user_agent,
             terminal_reason: terminal_reason.map(str::to_owned),
             error: error.map(str::to_owned),

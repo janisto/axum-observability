@@ -1,3 +1,10 @@
+use std::{error::Error, fmt};
+
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+
 use crate::RequestId;
 
 /// Validated inbound W3C trace context.
@@ -75,7 +82,7 @@ impl<S> axum::extract::FromRequestParts<S> for RequestContext
 where
     S: Send + Sync,
 {
-    type Rejection = axum::http::StatusCode;
+    type Rejection = MissingRequestContext;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
@@ -85,7 +92,41 @@ where
             .extensions
             .get::<Self>()
             .cloned()
-            .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            .ok_or(MissingRequestContext)
+    }
+}
+
+/// Rejection returned when [`RequestContext`] is extracted without the
+/// observability middleware installed.
+///
+/// Handlers can explicitly retain the typed rejection when middleware is
+/// optional during composition:
+///
+/// ```
+/// use axum_observability::{MissingRequestContext, RequestContext};
+///
+/// async fn request_id(
+///     context: Result<RequestContext, MissingRequestContext>,
+/// ) -> Result<String, MissingRequestContext> {
+///     Ok(context?.request_id().to_string())
+/// }
+/// # let _ = request_id;
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MissingRequestContext;
+
+impl fmt::Display for MissingRequestContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("request context unavailable")
+    }
+}
+
+impl Error for MissingRequestContext {}
+
+impl IntoResponse for MissingRequestContext {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
     }
 }
 
@@ -123,32 +164,51 @@ impl RequestContext {
 
 /// Stable application operation name attached to request or response
 /// extensions.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OperationId(String);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct OperationId(&'static str);
 
 impl OperationId {
-    /// Creates an operation identifier.
+    /// Creates an operation identifier from static route metadata.
+    ///
+    /// The value should be a stable semantic operation name. It must not
+    /// contain request-derived or user-derived data. Callers are responsible
+    /// for uniqueness within their application.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `value` is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use axum_observability::OperationId;
+    ///
+    /// const LIST_ITEMS: OperationId = OperationId::from_static("list-items");
+    /// assert_eq!(LIST_ITEMS.as_str(), "list-items");
+    /// ```
+    #[track_caller]
     #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub const fn from_static(value: &'static str) -> Self {
+        assert!(!value.is_empty(), "operation ID must not be empty");
+        Self(value)
     }
 
     /// Returns the operation identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0
     }
 }
 
-impl From<String> for OperationId {
-    fn from(value: String) -> Self {
-        Self(value)
+impl AsRef<str> for OperationId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
-impl From<&str> for OperationId {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl fmt::Display for OperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -157,11 +217,16 @@ mod tests {
     use super::OperationId;
 
     #[test]
-    fn operation_id_preserves_owned_and_borrowed_values() {
-        assert_eq!(OperationId::new("create-item").as_str(), "create-item");
-        assert_eq!(
-            OperationId::from(String::from("list-items")).as_str(),
-            "list-items"
-        );
+    fn operation_id_preserves_nonempty_static_values() {
+        const OPERATION: OperationId = OperationId::from_static("create-item");
+        assert_eq!(OPERATION.as_str(), "create-item");
+        assert_eq!(OPERATION.as_ref(), "create-item");
+        assert_eq!(OPERATION.to_string(), "create-item");
+    }
+
+    #[test]
+    #[should_panic(expected = "operation ID must not be empty")]
+    fn operation_id_rejects_empty_static_values() {
+        let _ = OperationId::from_static("");
     }
 }
