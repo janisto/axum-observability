@@ -138,6 +138,10 @@ impl ObservabilityConfig {
     }
 
     /// Sets a monotonic clock seam, primarily for deterministic testing.
+    ///
+    /// Clock panics are contained when the application uses Rust's default
+    /// `panic = "unwind"` behavior. Rust code cannot recover from
+    /// `panic = "abort"`.
     #[must_use]
     pub fn with_clock(mut self, clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
         self.clock = Arc::new(clock);
@@ -238,7 +242,8 @@ where
         let request_context = RequestContext::new(request_id, trace_context);
         let metadata = RequestMetadata::from_request(&request);
         let span = request_span(&request_context);
-        let started = (self.config.clock)();
+        let started = catch_unwind(AssertUnwindSafe(|| (self.config.clock)()))
+            .unwrap_or_else(|_| Instant::now());
         let enrichment = catch_unwind(AssertUnwindSafe(|| {
             (self.config.enricher)(&request_context)
         }))
@@ -283,10 +288,7 @@ where
                         ))
                     }
                     Err(error) => {
-                        guard.finish(
-                            Some("service_error"),
-                            Some("downstream service failed".to_owned()),
-                        );
+                        guard.finish(TerminalOutcome::ServiceError);
                         Err(error)
                     }
                 }
@@ -454,6 +456,25 @@ struct TerminalGuard {
     state: Option<TerminalState>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalOutcome {
+    Completed,
+    ServiceError,
+    BodyError,
+    ResponseDropped,
+}
+
+impl TerminalOutcome {
+    const fn record_fields(self) -> (Option<&'static str>, Option<&'static str>) {
+        match self {
+            Self::Completed => (None, None),
+            Self::ServiceError => (Some("service_error"), Some("downstream service failed")),
+            Self::BodyError => (Some("body_error"), Some("response body failed")),
+            Self::ResponseDropped => (Some("response_dropped"), None),
+        }
+    }
+}
+
 impl TerminalGuard {
     fn new(
         metadata: RequestMetadata,
@@ -496,7 +517,7 @@ impl TerminalGuard {
         }
     }
 
-    fn finish(&mut self, terminal_reason: Option<&str>, error: Option<String>) {
+    fn finish(&mut self, outcome: TerminalOutcome) {
         let Some(state) = self.state.take() else {
             return;
         };
@@ -504,6 +525,7 @@ impl TerminalGuard {
             catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
         let duration = finished.saturating_duration_since(state.started);
         let trace = state.request_context.trace_context();
+        let (terminal_reason, error) = outcome.record_fields();
         let record = AccessRecord {
             request_id: state.request_context.request_id().to_owned(),
             correlation_id: state.request_context.correlation_id().to_owned(),
@@ -520,13 +542,20 @@ impl TerminalGuard {
             remote_ip: state.metadata.remote_ip,
             user_agent: state.metadata.user_agent,
             terminal_reason: terminal_reason.map(str::to_owned),
-            error,
+            error: error.map(str::to_owned),
             enrichment: state.enrichment,
         };
-        let level = state.status.map_or(Level::ERROR, |status| {
+        let mapped_level = |status| {
             catch_unwind(AssertUnwindSafe(|| (state.config.level_mapper)(status)))
                 .unwrap_or_else(|_| default_level(status))
-        });
+        };
+        let level = match outcome {
+            TerminalOutcome::Completed => {
+                mapped_level(state.status.expect("completed response has a status"))
+            }
+            TerminalOutcome::ServiceError | TerminalOutcome::BodyError => Level::ERROR,
+            TerminalOutcome::ResponseDropped => state.status.map_or(Level::WARN, mapped_level),
+        };
         let serialized = serde_json::to_string(&record).expect("access record is serializable");
         state.span.in_scope(|| emit_access(level, &serialized));
     }
@@ -534,7 +563,7 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        self.finish(Some("response_dropped"), None);
+        self.finish(TerminalOutcome::ResponseDropped);
     }
 }
 
@@ -584,7 +613,7 @@ pin_project! {
 impl ObservedBody {
     fn new(body: Body, mut guard: TerminalGuard) -> Self {
         if body.is_end_stream() {
-            guard.finish(None, None);
+            guard.finish(TerminalOutcome::Completed);
         }
         Self { body, guard }
     }
@@ -601,17 +630,16 @@ impl HttpBody for ObservedBody {
         let mut this = self.project();
         match this.body.as_mut().poll_frame(context) {
             Poll::Ready(None) => {
-                this.guard.finish(None, None);
+                this.guard.finish(TerminalOutcome::Completed);
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Err(error))) => {
-                this.guard
-                    .finish(Some("body_error"), Some("response body failed".to_owned()));
+                this.guard.finish(TerminalOutcome::BodyError);
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(Some(Ok(frame))) => {
                 if this.body.is_end_stream() {
-                    this.guard.finish(None, None);
+                    this.guard.finish(TerminalOutcome::Completed);
                 }
                 Poll::Ready(Some(Ok(frame)))
             }

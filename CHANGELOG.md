@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Classified terminal body and service failures at `ERROR`, preserved mapped
+  levels for completed and abandoned responses, and contained initial clock
+  panics without replacing request handling.
+
 ### Changed
 
 - Relaxed dependency requirements across the supported Axum 0.8 line, reduced

@@ -261,9 +261,11 @@ Status and duration reflect the latest trustworthy state. If the response was
 never produced, status is omitted. The monotonic clock is saturating, so a bad
 custom clock cannot produce a negative duration.
 
-Custom generator, validator, level-mapper, and access-enricher panics are
-contained with safe fallback behavior. A finish-time clock failure falls back
-to the request start; a custom clock must not panic when the request begins.
+Custom generator, validator, level-mapper, access-enricher, and clock panics
+are contained with safe fallback behavior. An initial clock failure uses the
+package monotonic clock; a finish-time failure falls back to the request start.
+This containment requires Rust's default `panic = "unwind"`; Rust code cannot
+recover from `panic = "abort"`.
 Formatter serialization and writer errors do not replace the HTTP response.
 Writer failures can still mean a log record was not delivered; applications
 remain responsible for choosing and monitoring the output destination.
