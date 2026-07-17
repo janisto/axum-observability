@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-17
+
+### Changed
+
+- Stabilized the public API, configuration defaults, structured log fields,
+  Rust 1.97.0 support line, and Axum 0.8 support line as Semantic Versioning
+  compatibility contracts. This release does not change runtime behavior from
+  0.3.0.
+
 ## [0.3.0] - 2026-07-17
 
 ### Fixed
@@ -54,7 +63,8 @@ All notable changes to this project are documented here. The format is based on
   configure Trusted Publishing. This version intentionally exposed no
   middleware API.
 
-[Unreleased]: https://github.com/janisto/axum-observability/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/janisto/axum-observability/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/janisto/axum-observability/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/janisto/axum-observability/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janisto/axum-observability/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/janisto/axum-observability/releases/tag/v0.1.0

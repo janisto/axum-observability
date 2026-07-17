@@ -43,22 +43,21 @@ This is an independently maintained crate, not official Axum middleware.
 
 ## Requirements and installation
 
-The minimum supported Rust version is 1.97.0. Version 0.3.0 supports the Axum
+The minimum supported Rust version is 1.97.0. Version 1.0.0 supports the Axum
 0.8 release line, including Axum 0.8.0 with only its `matched-path` feature.
 
 ```toml
 [dependencies]
 axum = "0.8"
-axum-observability = "0.3.0"
+axum-observability = "1.0.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ```
 
-Version 0.3.0 intentionally resets the pre-1.0 API and structured-log contract
-to encode request-ID and operation-ID invariants and minimize captured request
-data by default. No deprecated aliases or compatibility layer are provided.
-While the crate is below 1.0, later minor versions may evolve the public API;
-patch versions preserve documented behavior.
+Version 1.0.0 stabilizes the API and structured-log contract introduced in
+0.3.0. Exported APIs, configuration defaults, structured fields, and supported
+Rust and Axum versions are compatibility contracts. Breaking changes require a
+new major version; minor and patch releases preserve documented behavior.
 
 ## GCP setup
 
@@ -374,7 +373,7 @@ data, and secrets out of those values.
 
 The crate supports Rust 1.97.0 or newer and the Axum 0.8 release line. The
 public `ObservabilityService` is the nameable Tower service produced by
-`ObservabilityLayer`. Beginning with 1.0.0, exported APIs, configuration
+`ObservabilityLayer`. In the 1.x release line, exported APIs, configuration
 defaults, structured fields, and supported runtime versions are compatibility
 contracts. Breaking changes require a new major version, explicit changelog
 coverage, and migration guidance.

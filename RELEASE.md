@@ -330,6 +330,10 @@ v0.2.0 is the first functional middleware release and the first version
 published through this OIDC architecture. The bootstrap remains visible in Git
 and registry history; release notes must never describe v0.1.0 as functional.
 
+v0.3.0 completed the pre-1.0 API, privacy, failure-handling, and dependency
+contract hardening. v1.0.0 promotes that reviewed contract to the stable 1.x
+release line without changing runtime behavior.
+
 ## Official documentation
 
 - [crates.io trusted publishing](https://crates.io/docs/trusted-publishing)
