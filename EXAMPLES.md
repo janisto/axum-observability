@@ -14,7 +14,6 @@ suite.
 | [`examples/basic.rs`](examples/basic.rs) | Generic JSON for local or provider-neutral pipelines. |
 | [`examples/aws.rs`](examples/aws.rs) | CloudWatch-friendly JSON and a derived X-Ray trace ID. |
 | [`examples/azure.rs`](examples/azure.rs) | Azure Monitor and Application Insights operation fields. |
-| [`examples/local_wrapper.rs`](examples/local_wrapper.rs) | Optional application-owned configuration helper. |
 
 ## Core wiring
 
@@ -49,15 +48,17 @@ let app = Router::new()
 No Google Cloud project ID is required. With valid W3C context,
 `logging.googleapis.com/trace` is the exact bare 32-character trace ID.
 
-## Run the canonical GCP example
+## Check the canonical GCP configuration
 
 ```bash
-cargo run --example gcp
+cargo check --locked --example gcp
 ```
 
-The repository examples build a router and exit; they demonstrate package
-wiring without choosing an application's listener, shutdown, or deployment
-policy. The same examples are compiled by `cargo test --all-targets`.
+The repository examples compile package configuration and router wiring without
+choosing an application's listener, shutdown, or deployment policy. The same
+examples are compiled by `cargo test --all-targets`.
+
+## Expected request behavior
 
 For a request carrying:
 
@@ -84,7 +85,7 @@ manufacture `logging.googleapis.com/spanId` from the incoming parent ID.
 ## Provider-neutral JSON
 
 ```bash
-cargo run --example basic
+cargo check --locked --example basic
 ```
 
 The default preset writes `level` and generic correlation fields without
@@ -93,7 +94,7 @@ provider-specific aliases.
 ## AWS
 
 ```bash
-cargo run --example aws
+cargo check --locked --example aws
 ```
 
 The AWS preset keeps flat JSON. A valid W3C trace ID is also formatted as
@@ -104,22 +105,44 @@ or parse `X-Amzn-Trace-Id`.
 ## Azure
 
 ```bash
-cargo run --example azure
+cargo check --locked --example azure
 ```
 
 The Azure preset maps valid W3C values to `operation_Id` and
 `operation_ParentId`. It does not initialize an Azure SDK or parse legacy
 `Request-Id` headers.
 
-## Optional local wrapper
+## Application logging
 
-[`examples/local_wrapper.rs`](examples/local_wrapper.rs) demonstrates a
-project-owned function that returns the application's standard configuration.
-It narrows accepted request IDs and selects a custom correlation header while
-retaining the crate's baseline validation and safe fallback.
+Use `tracing` directly in handlers and services. Events emitted while the
+request span is enabled inherit the package's validated request and trace
+correlation without passing a logger or context through application APIs:
 
-Keep wrappers local when they encode application policy. The crate deliberately
-does not add a second logging facade around `tracing`.
+```rust
+let item_id = "item-42";
+tracing::info!(item_id = %item_id, "loading item");
+
+let error = std::io::Error::other("backend unavailable");
+tracing::error!(error = %error, item_id = %item_id, "item load failed");
+```
+
+For operation spans, skip arguments by default and allowlist only fields that
+are safe and useful to record:
+
+```rust
+#[tracing::instrument(skip_all, fields(item_id = %item_id), err)]
+async fn validate_item(item_id: &str) -> Result<(), &'static str> {
+    if item_id.is_empty() {
+        Err("item ID is empty")
+    } else {
+        Ok(())
+    }
+}
+```
+
+Generic application-local level wrappers are unnecessary in Rust and can hide
+useful `tracing` callsite metadata. Prefer direct events or application-local
+semantic macros for specific domain events.
 
 ## Per-project checklist
 

@@ -54,7 +54,7 @@ versions preserve documented behavior.
 ## GCP setup
 
 When this documentation shows one configuration, it uses GCP. Complete
-provider-neutral, GCP, AWS, Azure, and local-wrapper examples are available in
+provider-neutral, GCP, AWS, and Azure configuration examples are available in
 [`examples`](examples) and [EXAMPLES.md](EXAMPLES.md).
 
 ```rust
