@@ -9,15 +9,17 @@ permissions:
   issues: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   label-pr:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - name: Run labeler
-        uses: actions/labeler@v6.1.0
+        uses: actions/labeler@v6.2.0
         with:
           configuration-path: .github/labeler.yml
           sync-labels: true
