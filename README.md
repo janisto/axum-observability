@@ -37,19 +37,22 @@ This is an independently maintained crate, not official Axum middleware.
 
 ## Requirements and installation
 
-The minimum supported Rust version is 1.97.0. The first functional release is
-v0.2.0 and targets Axum 0.8.9.
+The minimum supported Rust version is 1.97.0. Version 0.3.0 supports the Axum
+0.8 release line, including Axum 0.8.0 with only its `matched-path` feature.
 
 ```toml
 [dependencies]
-axum = "0.8.9"
-axum-observability = "0.2.0"
+axum = "0.8"
+axum-observability = "0.3.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ```
 
-While the crate is below 1.0, minor versions may evolve the public API. Patch
-versions preserve documented behavior.
+Version 0.3.0 intentionally resets the pre-1.0 API and structured-log contract
+to encode request-ID and operation-ID invariants and minimize captured request
+data by default. No deprecated aliases or compatibility layer are provided.
+While the crate is below 1.0, later minor versions may evolve the public API;
+patch versions preserve documented behavior.
 
 ## GCP setup
 
@@ -96,6 +99,10 @@ async fn handler(context: RequestContext) {
 ```
 
 Event fields cannot overwrite package-owned request correlation values.
+Without `ObservabilityLayer`, extraction rejects with the public
+`MissingRequestContext` error, status 500, and the fixed body
+`request context unavailable`. This makes middleware misconfiguration
+diagnosable without reflecting request data.
 
 ## Middleware placement
 
@@ -138,6 +145,11 @@ when it contains 1-128 ASCII URI-unreserved characters: `A-Z`, `a-z`, `0-9`,
 `-`, `.`, `_`, and `~`. Missing, empty, duplicate, oversized, non-ASCII, or
 otherwise invalid values are replaced. The fallback is 128 random bits encoded
 as 32 lowercase hexadecimal characters.
+
+Application configuration and tests can validate IDs through
+`RequestId::parse`, `FromStr`, or `TryFrom`; invalid values return the public,
+non-sensitive `InvalidRequestId` error. `RequestId` has no unchecked public
+constructor.
 
 The selected value is available from:
 
@@ -306,8 +318,19 @@ remain responsible for choosing and monitoring the output destination.
 
 Unknown options do not exist: configuration is compile-time checked. The header
 setter accepts a validated `http::HeaderName`; use `HeaderName::from_static` or
-`HeaderName::try_from` at the configuration boundary. Enrichment values must be
-safe to log; the crate does not redact application-owned fields.
+`HeaderName::try_from` at the configuration boundary:
+
+```rust
+use axum::http::HeaderName;
+use axum_observability::ObservabilityConfig;
+
+let config = ObservabilityConfig::default()
+    .with_request_id_header(HeaderName::from_static("x-correlation-id"));
+# let _: ObservabilityConfig = config;
+```
+
+Enrichment values must be safe to log; the crate does not redact
+application-owned fields.
 
 ## Proxy trust and privacy
 
@@ -343,10 +366,12 @@ data, and secrets out of those values.
 
 ## Compatibility and development
 
-The crate supports Rust 1.97.0 or newer and the Axum 0.8 release line. Beginning with 1.0.0,
-exported APIs, configuration defaults, structured fields, and supported runtime
-versions are compatibility contracts. Breaking changes require a new major
-version, explicit changelog coverage, and migration guidance.
+The crate supports Rust 1.97.0 or newer and the Axum 0.8 release line. The
+public `ObservabilityService` is the nameable Tower service produced by
+`ObservabilityLayer`. Beginning with 1.0.0, exported APIs, configuration
+defaults, structured fields, and supported runtime versions are compatibility
+contracts. Breaking changes require a new major version, explicit changelog
+coverage, and migration guidance.
 
 Development uses [just](https://github.com/casey/just). The normal gates are:
 

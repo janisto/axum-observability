@@ -271,7 +271,7 @@ TEMPORARY="$(mktemp -d)"
 cargo new --bin "$TEMPORARY/consumer"
 cargo add --manifest-path "$TEMPORARY/consumer/Cargo.toml" \
   "axum-observability@=$VERSION" \
-  "axum@=0.8.9"
+  "axum@0.8"
 cargo check --manifest-path "$TEMPORARY/consumer/Cargo.toml" --locked
 ```
 
