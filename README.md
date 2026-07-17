@@ -1,5 +1,11 @@
 # axum-observability
 
+[![Crates.io](https://img.shields.io/crates/v/axum-observability.svg)](https://crates.io/crates/axum-observability)
+[![Documentation](https://docs.rs/axum-observability/badge.svg)](https://docs.rs/axum-observability)
+[![Rust version](https://img.shields.io/crates/msrv/axum-observability.svg)](#requirements-and-installation)
+[![CI](https://img.shields.io/github/actions/workflow/status/janisto/axum-observability/ci.yml?branch=main&label=CI)](https://github.com/janisto/axum-observability/actions/workflows/ci.yml)
+[![Socket Badge](https://badge.socket.dev/cargo/package/axum-observability)](https://socket.dev/cargo/package/axum-observability)
+
 Focused Axum middleware for request IDs, W3C trace correlation,
 request-scoped structured events, and one terminal access record per response.
 

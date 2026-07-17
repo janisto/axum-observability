@@ -1,0 +1,50 @@
+# Auto-label PRs based on changed file paths
+
+api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/**'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'README.md'
+          - 'EXAMPLES.md'
+          - 'CHANGELOG.md'
+          - 'RELEASE.md'
+          - 'examples/**'
+
+packaging:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'rust-toolchain.toml'
+          - 'deny.toml'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - '.cargo/**'
+          - '.clippy.toml'
+          - 'Justfile'
+
+github-actions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+
+feature:
+  - head-branch: ['^feature', 'feature']
+
+bug:
+  - head-branch: ['^bug', 'bug']
+
+improvement:
+  - head-branch: ['^improve', 'improve', 'improvement']
