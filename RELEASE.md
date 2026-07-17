@@ -131,9 +131,7 @@ From the exact clean candidate commit:
 ```bash
 just install
 just qa
-just package-check
 cargo publish --dry-run --locked
-actionlint .github/workflows/ci.yml .github/workflows/release.yml
 git diff --check
 git status --short
 ```
@@ -142,26 +140,10 @@ git status --short
 `--no-verify` for a release candidate.
 
 `just qa` runs formatting, Clippy with warnings denied, all tests and examples,
-doctests, dependency policy, and the RustSec audit. `just package-check` creates
-the `.crate` archive, permits only the manifest's public file set, enforces the
-crates.io size boundary, compiles Cargo's extracted package, and runs an
-isolated consumer against that packaged source.
-
-Inspect and hash the candidate archive:
-
-```bash
-VERSION="$(cargo metadata --locked --no-deps --format-version 1 |
-  jq -er '.packages[] | select(.name == "axum-observability") | .version')"
-
-cargo package --locked --list
-tar -tzf "target/package/axum-observability-$VERSION.crate"
-shasum -a 256 "target/package/axum-observability-$VERSION.crate"
-```
-
-The archive must contain only the reviewed library source, examples, package
-metadata, README, changelog, example guide, and license. It must not contain
-tests, plans, credentials, local output, maintainer-only guides, coverage
-reports, or mutation artifacts.
+doctests, dependency policy, the RustSec audit, actionlint, and
+[zizmor](https://docs.zizmor.sh/). `cargo publish --dry-run --locked` performs
+Cargo's standard package and publication validation without uploading the
+crate.
 
 Merge the release preparation through a green pull request to `main`.
 

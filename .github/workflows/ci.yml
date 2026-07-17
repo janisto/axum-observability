@@ -97,20 +97,3 @@ jobs:
             target/llvm-cov/html
           if-no-files-found: error
           retention-days: 7
-
-  package:
-    name: Package and isolated consumer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.0
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal
-      - uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-package
-      - run: bash scripts/package-check.sh

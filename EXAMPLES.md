@@ -137,7 +137,7 @@ does not add a second logging facade around `tracing`.
   the crate never trusts forwarded headers itself.
 - Keep provider tracing SDKs separate from this correlation crate.
 - Never place secrets or raw bodies in application log or enrichment fields.
-- Run `just qa` and `just package-check` before release.
+- Run `just qa` and `cargo publish --dry-run --locked` before release.
 
 ## References
 

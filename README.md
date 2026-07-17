@@ -326,15 +326,17 @@ version, explicit changelog coverage, and migration guidance.
 Development uses [just](https://github.com/casey/just). The normal gates are:
 
 ```bash
+brew install actionlint zizmor
+```
+
+```bash
 just qa
-just package-check
 ```
 
 `just qa` runs formatting, Clippy with warnings denied, tests, doctests,
-dependency policy, and the RustSec audit. `just package-check` creates the exact
-crate archive, verifies its allowlisted contents and size, compiles the packaged
-crate, and runs an isolated consumer against it. Maintainers should follow the
-public [release architecture and guide](RELEASE.md).
+dependency policy, the RustSec audit, [actionlint](https://github.com/rhysd/actionlint),
+and [zizmor](https://docs.zizmor.sh/). Maintainers should follow the public
+[release architecture and guide](RELEASE.md).
 
 ## Property and mutation testing
 
@@ -346,8 +348,7 @@ testing remains an explicit maintainer campaign:
 just mutation
 ```
 
-Mutation testing runs outside `just qa`; see [MUTATION.md](MUTATION.md) for the
-reviewed baseline and narrow exclusions. Add a behavioral test when a surviving
+Mutation testing runs outside `just qa`. Add a behavioral test when a surviving
 mutant exposes a real contract gap. Equivalent transformations do not need
 artificial assertions.
 

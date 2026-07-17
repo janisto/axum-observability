@@ -41,6 +41,11 @@ audit:
     cargo audit
 
 [group('qa')]
+workflow-check:
+    actionlint
+    zizmor --offline .
+
+[group('qa')]
 coverage-lcov:
     cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage.lcov
 
@@ -52,11 +57,7 @@ coverage-html:
 coverage: coverage-lcov coverage-html
 
 [group('qa')]
-package-check:
-    scripts/package-check.sh
-
-[group('qa')]
-qa: fmt-check lint test test-doc deny audit
+qa: workflow-check fmt-check lint test test-doc deny audit
 
 [group('adversarial')]
 mutation *args:

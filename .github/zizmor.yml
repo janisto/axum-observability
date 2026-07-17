@@ -1,0 +1,10 @@
+rules:
+  dependabot-cooldown:
+    config:
+      # Repository policy intentionally uses a one-day release cooldown.
+      days: 1
+  unpinned-uses:
+    config:
+      # Repository policy requires full release tags.
+      policies:
+        "*": ref-pin
