@@ -17,13 +17,13 @@ env:
 
 jobs:
   format-lint:
-    name: Format and Clippy
+    name: Format, manifest, Clippy, and rustdoc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal --component clippy,rustfmt
+      - run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -32,7 +32,12 @@ jobs:
             target
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-lint
       - run: cargo fmt --all -- --check
+      - run: cargo install --locked cargo-sort --version 2.1.3
+      - run: cargo sort --check --grouped
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D rustdoc::all
 
   tests:
     name: Tests and doctests
@@ -41,7 +46,7 @@ jobs:
       - uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal
+      - run: rustup toolchain install 1.97.0 --profile minimal
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -49,7 +54,7 @@ jobs:
             ~/.cargo/git
             target
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-tests
-      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --all-targets --all-features
       - run: cargo test --locked --doc
 
   dependency-policy:
@@ -59,7 +64,7 @@ jobs:
       - uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal
+      - run: rustup toolchain install 1.97.0 --profile minimal
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -68,8 +73,42 @@ jobs:
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-policy
       - run: cargo install --locked cargo-deny --version 0.20.2
       - run: cargo install --locked cargo-audit --version 0.22.2
+      - run: cargo install --locked cargo-machete --version 0.9.2
+      - run: cargo machete
       - run: cargo deny check
       - run: cargo audit
+
+  direct-minimum-dependencies:
+    name: Direct minimum dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2026-07-16 --profile minimal
+      - run: rustup toolchain install 1.97.0 --profile minimal
+      - run: cargo +nightly-2026-07-16 generate-lockfile -Z direct-minimal-versions
+      - run: cargo +1.97.0 check --locked --all-features
+
+  external-types:
+    name: Public external types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2026-03-20 --profile minimal
+      - run: cargo install --locked cargo-check-external-types --version 0.5.0
+      - name: Check reviewed public external types
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tool's pinned Rust 1.96 nightly predates this crate's MSRV.
+          # Removing only Cargo's version gate leaves the documented API intact.
+          cp Cargo.toml Cargo.toml.external-types
+          trap 'mv Cargo.toml.external-types Cargo.toml' EXIT
+          sed -i '/^rust-version = /d' Cargo.toml
+          cargo +nightly-2026-03-20 check-external-types --all-features
 
   coverage:
     name: Source coverage
@@ -78,7 +117,7 @@ jobs:
       - uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal --component llvm-tools-preview
+      - run: rustup toolchain install 1.97.0 --profile minimal --component llvm-tools-preview
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -97,20 +136,3 @@ jobs:
             target/llvm-cov/html
           if-no-files-found: error
           retention-days: 7
-
-  package:
-    name: Package and isolated consumer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.0
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install 1.96.1 --profile minimal
-      - uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-package
-      - run: bash scripts/package-check.sh

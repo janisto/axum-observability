@@ -1,11 +1,10 @@
-#![allow(missing_docs)]
+//! End-to-end middleware and formatter contract tests.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     future::{Ready, ready},
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -15,24 +14,30 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "peer-ip")]
+use axum::extract::ConnectInfo;
 use axum::{
     Extension, Router,
-    body::{Body, Bytes},
-    extract::ConnectInfo,
-    http::{HeaderValue, Request, Response, StatusCode},
+    body::{Body, Bytes, to_bytes},
+    http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode},
     response::IntoResponse,
     routing::get,
 };
 use axum_observability::{
-    ObservabilityConfig, ObservabilityLayer, OperationId, Preset, RequestContext,
+    FieldConvention, MissingRequestContext, ObservabilityConfig, ObservabilityLayer, OperationId,
+    RequestContext, RequestId,
 };
 use http_body::{Body as HttpBody, Frame};
-use http_body_util::BodyExt;
 use serde_json::Value;
+#[cfg(feature = "peer-ip")]
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower::{Layer, Service, ServiceExt};
 use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer};
 use tracing_subscriber::{
-    Layer as SubscriberLayer, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt,
+    Layer as SubscriberLayer,
+    filter::{LevelFilter, Targets},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
 };
 
 #[derive(Clone, Default)]
@@ -73,6 +78,69 @@ impl Capture {
     }
 }
 
+#[cfg(feature = "peer-ip")]
+async fn privacy_record(config: ObservabilityConfig) -> Value {
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/items/{id}", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+    let mut request = Request::builder()
+        .uri("/items/42?secret=query")
+        .header("user-agent", "agent/1")
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        3210,
+    )));
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    capture.records().remove(0)
+}
+
+#[cfg(feature = "peer-ip")]
+async fn representative_access_record(convention: FieldConvention) -> Value {
+    let config = ObservabilityConfig::default()
+        .with_field_convention(convention)
+        .with_raw_path(true)
+        .with_peer_ip(true)
+        .with_user_agent(true)
+        .with_access_enricher(|_| {
+            BTreeMap::from([("tenant".to_owned(), Value::String("public".to_owned()))])
+        });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/items/{id}",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get-item")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+    let mut request = Request::builder()
+        .uri("/items/42?secret=query")
+        .header("x-request-id", "request-42")
+        .header("user-agent", "agent/1")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        3210,
+    )));
+    app.oneshot(request).await.expect("response");
+    capture.records().remove(0)
+}
+
 #[derive(Clone, Default)]
 struct CountingCapture {
     capture: Capture,
@@ -106,12 +174,142 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CountingCapture {
     }
 }
 
+#[derive(Clone)]
+struct FailingCapture {
+    state: Arc<Mutex<FailingWriterState>>,
+    prefix_len: usize,
+}
+
+#[derive(Default)]
+struct FailingWriterState {
+    calls: usize,
+    bytes: Vec<u8>,
+}
+
+struct FailingWriter {
+    state: Arc<Mutex<FailingWriterState>>,
+    prefix_len: usize,
+}
+
+impl io::Write for FailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut state = self.state.lock().expect("failing writer lock");
+        state.calls += 1;
+        if state.bytes.is_empty() && self.prefix_len > 0 {
+            let written = self.prefix_len.min(bytes.len());
+            state.bytes.extend_from_slice(&bytes[..written]);
+            Ok(written)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "secret writer detail",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for FailingCapture {
+    type Writer = FailingWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        FailingWriter {
+            state: self.state.clone(),
+            prefix_len: self.prefix_len,
+        }
+    }
+}
+
 fn subscriber(config: &ObservabilityConfig, capture: Capture) -> impl tracing::Subscriber {
     tracing_subscriber::registry().with(config.json_layer(capture))
 }
 
 async fn context_handler(context: RequestContext) -> String {
     format!("{}|{}", context.request_id(), context.correlation_id())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_request_context_has_a_stable_non_sensitive_rejection() {
+    fn assert_standard_traits<T: Clone + Copy + std::fmt::Debug + Eq + std::error::Error>() {}
+    assert_standard_traits::<MissingRequestContext>();
+
+    let response = Router::new()
+        .route("/", get(context_handler))
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "request context unavailable");
+}
+
+async fn canonical_identity_handler(context: RequestContext, headers: HeaderMap) -> String {
+    let values = headers
+        .get_all("x-request-id")
+        .iter()
+        .map(|value| value.to_str().expect("canonical ID is text"))
+        .collect::<Vec<_>>();
+    format!("{}|{}|{}", context.request_id(), values.len(), values[0])
+}
+
+async fn canonical_logging_handler(context: RequestContext, headers: HeaderMap) -> String {
+    tracing::info!("identity observed");
+    canonical_identity_handler(context, headers).await
+}
+
+async fn custom_identity_handler(context: RequestContext, headers: HeaderMap) -> String {
+    format!(
+        "{}|{}|{}",
+        context.request_id(),
+        headers.get_all("x-correlation-id").iter().count(),
+        headers.get("x-request-id").is_none()
+    )
+}
+
+async fn gcp_health_handler() -> &'static str {
+    tracing::info!(
+        service_name = "example-service",
+        service_version = "0.3.0",
+        health_status = "ok",
+        "health check"
+    );
+    tracing::debug!(
+        dependency = "database",
+        dependency_status = "ok",
+        check_duration_ms = 3_u64,
+        "dependency check"
+    );
+    "ok"
+}
+
+async fn gcp_health_records(filter: LevelFilter) -> (StatusCode, Bytes, Vec<Value>) {
+    let config = ObservabilityConfig::default()
+        .with_field_convention(FieldConvention::Gcp)
+        .with_raw_path(true);
+    let capture = Capture::default();
+    let layer = config
+        .json_layer(capture.clone())
+        .with_filter(Targets::new().with_default(filter));
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+    let app = Router::new()
+        .route("/health", get(gcp_health_handler))
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("x-request-id", "health-example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    (status, body, capture.records())
 }
 
 #[derive(Clone)]
@@ -138,7 +336,7 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
-        .route("/context", get(context_handler))
+        .route("/context", get(canonical_identity_handler))
         .layer(ObservabilityLayer::new(config));
 
     let response = app
@@ -154,34 +352,108 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
     assert_eq!(response.headers()["x-request-id"], "safe_ID~1");
     assert!(capture.records().is_empty(), "body has not completed yet");
 
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    assert_eq!(body, "safe_ID~1|safe_ID~1");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "safe_ID~1|1|safe_ID~1");
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["path"], "/context");
+    assert!(records[0].get("path").is_none());
     assert_eq!(records[0]["path_template"], "/context");
     assert!(records[0].to_string().find("secret").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn replaces_duplicate_ids_and_retries_a_bad_custom_generator_once() {
+async fn canonical_request_id_is_shared_by_context_header_span_response_and_terminal_record() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(canonical_logging_handler))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("x-request-id", "same-everywhere")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.headers()["x-request-id"], "same-everywhere");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "same-everywhere|1|same-everywhere");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["request_id"], "same-everywhere");
+        assert_eq!(record["correlation_id"], "same-everywhere");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_invalid_duplicate_and_comma_joined_ids_are_canonicalized_before_service() {
+    let config = ObservabilityConfig::default().with_request_id_generator(|| {
+        Some(RequestId::parse("generated-canonical").expect("valid generated ID"))
+    });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(canonical_identity_handler))
+        .layer(ObservabilityLayer::new(config));
+
+    let mut requests = vec![
+        Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .expect("missing request ID"),
+        Request::builder()
+            .uri("/")
+            .header("x-request-id", "rejected/secret")
+            .body(Body::empty())
+            .expect("invalid request ID"),
+        Request::builder()
+            .uri("/")
+            .header("x-request-id", "first,second")
+            .body(Body::empty())
+            .expect("joined request ID"),
+    ];
+    let mut duplicate = Request::builder()
+        .uri("/")
+        .header("x-request-id", "first-secret")
+        .body(Body::empty())
+        .expect("duplicate request ID");
+    duplicate
+        .headers_mut()
+        .append("x-request-id", HeaderValue::from_static("second-secret"));
+    requests.push(duplicate);
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.headers()["x-request-id"], "generated-canonical");
+        let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+        assert_eq!(body, "generated-canonical|1|generated-canonical");
+    }
+
+    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    for rejected in [
+        "rejected/secret",
+        "first,second",
+        "first-secret",
+        "second-secret",
+    ] {
+        assert!(!output.contains(rejected), "leaked {rejected:?}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replaces_duplicate_ids_and_invokes_the_generator_once() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default().with_request_id_generator(move || {
-        let attempt = generator_attempts.fetch_add(1, Ordering::SeqCst);
-        Some(
-            if attempt == 0 {
-                "not valid"
-            } else {
-                "retry-ok"
-            }
-            .to_owned(),
-        )
+        generator_attempts.fetch_add(1, Ordering::SeqCst);
+        Some(RequestId::parse("generated-once").expect("valid generated ID"))
     });
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
@@ -200,14 +472,19 @@ async fn replaces_duplicate_ids_and_retries_a_bad_custom_generator_once() {
         .append("x-request-id", HeaderValue::from_static("second"));
 
     let response = app.oneshot(request).await.expect("response");
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(response.headers()["x-request-id"], "retry-ok");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(response.headers()["x-request-id"], "generated-once");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default()
-        .with_request_id_generator(|| panic!("generator failure"))
+        .with_request_id_generator(move || {
+            generator_attempts.fetch_add(1, Ordering::SeqCst);
+            panic!("generator failure");
+        })
         .with_request_id_validator(|_| false);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
@@ -227,6 +504,48 @@ async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything
         id.bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generator_none_and_validator_rejection_use_package_owned_ids() {
+    let none_config = ObservabilityConfig::default().with_request_id_generator(|| None);
+    let none_app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(none_config));
+    let none_response = none_app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    let none_id = none_response.headers()["x-request-id"]
+        .to_str()
+        .expect("request ID text");
+    assert_eq!(
+        RequestId::parse(none_id).expect("valid fallback").as_str(),
+        none_id
+    );
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let generator_attempts = attempts.clone();
+    let rejected_config = ObservabilityConfig::default()
+        .with_request_id_generator(move || {
+            generator_attempts.fetch_add(1, Ordering::SeqCst);
+            Some(RequestId::parse("validator-rejected").expect("valid generated ID"))
+        })
+        .with_request_id_validator(|_| false);
+    let rejected_app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(rejected_config));
+    let rejected_response = rejected_app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    let rejected_id = rejected_response.headers()["x-request-id"]
+        .to_str()
+        .expect("request ID text");
+    assert_ne!(rejected_id, "validator-rejected");
+    assert!(RequestId::parse(rejected_id).is_ok());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -237,7 +556,7 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         StatusCode::NO_CONTENT
     }
 
-    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
@@ -255,7 +574,7 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         .expect("request");
 
     let response = app.oneshot(request).await.expect("response");
-    response.into_body().collect().await.expect("body");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
     let records = capture.records();
     assert_eq!(records.len(), 2);
     for record in &records {
@@ -273,8 +592,33 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
     assert!(records[0].get("level").is_none());
     assert!(records[1]["httpRequest"].is_object());
     assert_eq!(records[1]["httpRequest"]["requestMethod"], "GET");
-    assert_eq!(records[1]["httpRequest"]["requestUrl"], "/items/42");
+    assert!(records[1]["httpRequest"].get("requestUrl").is_none());
     assert!(records[1]["httpRequest"]["status"].is_u64());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn future_traceparent_extension_is_accepted_but_never_logged() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "future-request")
+        .header(
+            "traceparent",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-opaque-secret",
+        )
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "future-request|4bf92f3577b34da6a3ce929d0e0e4736");
+    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    assert!(!output.contains("opaque-secret"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -299,12 +643,7 @@ async fn duplicate_traceparent_is_untrusted_and_falls_back_to_request_id() {
             .append("traceparent", HeaderValue::from_str(value).expect("header"));
     }
     let response = app.oneshot(request).await.expect("response");
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "request-only|request-only");
 }
 
@@ -333,7 +672,7 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
         .await
         .expect("response");
     assert!(capture.records().is_empty());
-    response.into_body().collect().await.expect("body");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
@@ -369,7 +708,7 @@ async fn already_ended_body_finishes_before_exposing_eof() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_an_unread_response_emits_one_abnormal_terminal_record() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::DEBUG);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
@@ -384,6 +723,8 @@ async fn dropping_an_unread_response_emits_one_abnormal_terminal_record() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], 200);
+    assert_eq!(records[0]["level"], "DEBUG");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
 }
 
@@ -446,8 +787,7 @@ async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
     assert!(capture.records().is_empty());
 
     let mut body = response.into_body();
-    let frame = body
-        .frame()
+    let frame = std::future::poll_fn(|context| Pin::new(&mut body).poll_frame(context))
         .await
         .expect("final frame")
         .expect("successful final frame");
@@ -462,9 +802,12 @@ async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn body_error_emits_once_with_controlled_error_information() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::TRACE);
     let capture = Capture::default();
-    let _guard = subscriber(&config, capture.clone()).set_default();
+    let filtered = config
+        .json_layer(capture.clone())
+        .with_filter(Targets::new().with_default(LevelFilter::WARN));
+    let _guard = tracing_subscriber::registry().with(filtered).set_default();
     let app = Router::new()
         .route(
             "/",
@@ -475,29 +818,196 @@ async fn body_error_emits_once_with_controlled_error_information() {
         .oneshot(Request::new(Body::empty()))
         .await
         .expect("response");
-    assert!(response.into_body().collect().await.is_err());
+    assert!(to_bytes(response.into_body(), 1_024).await.is_err());
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], 200);
+    assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "body_error");
     assert_eq!(records[0]["error"], "response body failed");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cloud_presets_emit_exact_provider_trace_shapes() {
-    for (preset, key, expected) in [
+async fn service_error_is_returned_and_emitted_once_at_error() {
+    let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::TRACE);
+    let capture = Capture::default();
+    let filtered = config
+        .json_layer(capture.clone())
+        .with_filter(Targets::new().with_default(LevelFilter::WARN));
+    let _guard = tracing_subscriber::registry().with(filtered).set_default();
+    let service =
+        ObservabilityLayer::new(config).layer(tower::service_fn(|_request: Request<Body>| async {
+            Err::<Response<Body>, _>(io::Error::other("original service error"))
+        }));
+
+    let error = service
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect_err("service must fail");
+    assert_eq!(error.to_string(), "original service error");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["level"], "ERROR");
+    assert_eq!(records[0]["terminal_reason"], "service_error");
+    assert_eq!(records[0]["error"], "downstream service failed");
+    assert!(records[0].get("status").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_statuses_use_the_configured_mapper_once() {
+    let config = ObservabilityConfig::default().with_status_level_mapper(|status| match status {
+        StatusCode::OK => tracing::Level::DEBUG,
+        StatusCode::BAD_REQUEST => tracing::Level::WARN,
+        StatusCode::INTERNAL_SERVER_ERROR => tracing::Level::ERROR,
+        _ => tracing::Level::TRACE,
+    });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/ok", get(|| async { StatusCode::OK }))
+        .route("/bad", get(|| async { StatusCode::BAD_REQUEST }))
+        .route(
+            "/error",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        )
+        .layer(ObservabilityLayer::new(config));
+
+    for path in ["/ok", "/bad", "/error"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["level"], "DEBUG");
+    assert_eq!(records[1]["level"], "WARN");
+    assert_eq!(records[2]["level"], "ERROR");
+    assert!(
+        records
+            .iter()
+            .all(|record| record.get("terminal_reason").is_none())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_clock_panic_is_contained_and_request_completes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let clock_calls = calls.clone();
+    let config = ObservabilityConfig::default().with_clock(move || {
+        assert_ne!(
+            clock_calls.fetch_add(1, Ordering::SeqCst),
+            0,
+            "initial clock failure"
+        );
+        Instant::now()
+    });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("clock panic must not replace the response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0]["duration_ms"].as_f64().expect("duration") >= 0.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finish_clock_panic_falls_back_to_zero_duration() {
+    let started = Instant::now();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let clock_calls = calls.clone();
+    let config = ObservabilityConfig::default().with_clock(move || {
+        if clock_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            started
+        } else {
+            panic!("finish clock failure");
+        }
+    });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("clock panic must not replace the response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(capture.records()[0]["duration_ms"], 0.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mapper_panic_uses_the_default_status_level() {
+    let config =
+        ObservabilityConfig::default().with_status_level_mapper(|_| panic!("mapper failure"));
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::IM_A_TEAPOT }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("mapper panic must not replace the response");
+    assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+    assert_eq!(capture.records()[0]["level"], "WARN");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn enricher_panic_uses_an_empty_enrichment() {
+    let config =
+        ObservabilityConfig::default().with_access_enricher(|_| panic!("enricher failure"));
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("enricher panic must not replace the response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let record = &capture.records()[0];
+    assert_eq!(record["status"], 204);
+    assert_eq!(record["message"], "request completed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn field_conventions_emit_exact_provider_trace_shapes() {
+    for (convention, key, expected) in [
         (
-            Preset::Aws,
+            FieldConvention::Aws,
             "xray_trace_id",
             "1-4bf92f35-77b34da6a3ce929d0e0e4736",
         ),
         (
-            Preset::Azure,
+            FieldConvention::Azure,
             "operation_Id",
             "4bf92f3577b34da6a3ce929d0e0e4736",
         ),
     ] {
-        let config = ObservabilityConfig::default().with_preset(preset);
+        let config = ObservabilityConfig::default().with_field_convention(convention);
         let capture = Capture::default();
         let _guard = subscriber(&config, capture.clone()).set_default();
         let app = Router::new()
@@ -511,48 +1021,170 @@ async fn cloud_presets_emit_exact_provider_trace_shapes() {
             )
             .body(Body::empty())
             .expect("request");
-        app.oneshot(request)
-            .await
-            .expect("response")
-            .into_body()
-            .collect()
-            .await
-            .expect("body");
+        let response = app.oneshot(request).await.expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
         let records = capture.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0][key], expected);
-        if preset == Preset::Azure {
+        if convention == FieldConvention::Azure {
             assert_eq!(records[0]["operation_ParentId"], "00f067aa0ba902b7");
         }
     }
 }
 
-#[test]
-fn malformed_request_span_trace_id_does_not_panic_or_emit_aws_metadata() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Aws);
+#[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "peer-ip")]
+async fn field_conventions_emit_exact_non_conflicting_access_schemas() {
+    let common = BTreeSet::from([
+        "correlation_id",
+        "duration_ms",
+        "level",
+        "message",
+        "method",
+        "operation_id",
+        "parent_id",
+        "path",
+        "path_template",
+        "peer_ip",
+        "request_id",
+        "status",
+        "target",
+        "tenant",
+        "timestamp",
+        "trace_flags",
+        "trace_id",
+        "trace_sampled",
+        "user_agent",
+    ]);
+
+    for convention in [
+        FieldConvention::Generic,
+        FieldConvention::Gcp,
+        FieldConvention::Aws,
+        FieldConvention::Azure,
+    ] {
+        let record = representative_access_record(convention).await;
+        let mut expected = common.clone();
+        match convention {
+            FieldConvention::Generic => {}
+            FieldConvention::Gcp => {
+                expected.remove("level");
+                expected.extend([
+                    "httpRequest",
+                    "logging.googleapis.com/trace",
+                    "logging.googleapis.com/trace_sampled",
+                    "severity",
+                ]);
+            }
+            FieldConvention::Aws => {
+                expected.insert("xray_trace_id");
+            }
+            FieldConvention::Azure => {
+                expected.extend(["operation_Id", "operation_ParentId"]);
+            }
+            _ => unreachable!("all current conventions are covered"),
+        }
+        let actual = record
+            .as_object()
+            .expect("access record object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "unexpected {convention:?} schema");
+        assert!(record["status"].is_u64());
+        assert!(record["duration_ms"].is_f64());
+        assert_eq!(record["path"], "/items/42");
+        assert!(!record.to_string().contains("secret=query"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_abandonment_adds_only_its_documented_terminal_field() {
+    let config = ObservabilityConfig::default();
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
-    let span = tracing::info_span!(
-        target: "axum_observability::request",
-        "request",
-        trace_id = "short",
-    );
+    let app = Router::new()
+        .route("/items/{id}", get(|| async { "item" }))
+        .layer(ObservabilityLayer::new(config));
 
-    span.in_scope(|| tracing::info!("application event"));
+    let completed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/items/1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    to_bytes(completed.into_body(), 1_024).await.expect("body");
+
+    let abandoned = app
+        .oneshot(
+            Request::builder()
+                .uri("/items/2")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    drop(abandoned);
 
     let records = capture.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["trace_id"], "short");
-    assert!(records[0].get("xray_trace_id").is_none());
+    assert_eq!(records.len(), 2);
+    let normal_keys = records[0]
+        .as_object()
+        .expect("normal object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut abnormal_keys = records[1]
+        .as_object()
+        .expect("abnormal object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(abnormal_keys.remove("terminal_reason"));
+    assert_eq!(abnormal_keys, normal_keys);
+    assert_eq!(records[1]["terminal_reason"], "response_dropped");
+    assert!(records[1].get("error").is_none());
+}
+
+#[test]
+fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Aws);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let invalid = [
+        "short".to_owned(),
+        "abc".to_owned(),
+        "g".repeat(32),
+        "0".repeat(32),
+    ];
+    for trace_id in &invalid {
+        let span = tracing::info_span!(
+            target: "axum_observability::request",
+            "request",
+            trace_id = trace_id.as_str(),
+        );
+        span.in_scope(|| tracing::info!("application event"));
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), invalid.len());
+    for (record, trace_id) in records.iter().zip(invalid) {
+        assert_eq!(record["trace_id"], trace_id);
+        assert!(record.get("xray_trace_id").is_none());
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn filtered_request_span_does_not_remove_access_record_correlation() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let capture = Capture::default();
     let filtered = config
         .json_layer(capture.clone())
-        .with_filter(EnvFilter::new("warn"));
+        .with_filter(Targets::new().with_default(LevelFilter::WARN));
     let _guard = tracing_subscriber::registry().with(filtered).set_default();
     let app = Router::new()
         .route("/", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
@@ -586,11 +1218,13 @@ async fn filtered_request_span_does_not_remove_access_record_correlation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn request_span_directive_preserves_correlation_and_rejects_late_spoofing() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let capture = Capture::default();
-    let filtered = config
-        .json_layer(capture.clone())
-        .with_filter(EnvFilter::new("warn,axum_observability::request=info"));
+    let filtered = config.json_layer(capture.clone()).with_filter(
+        Targets::new()
+            .with_default(LevelFilter::WARN)
+            .with_target("axum_observability::request", LevelFilter::INFO),
+    );
     let _guard = tracing_subscriber::registry().with(filtered).set_default();
     let app = Router::new()
         .route(
@@ -630,7 +1264,7 @@ async fn request_span_directive_preserves_correlation_and_rejects_late_spoofing(
 
 #[tokio::test(flavor = "current_thread")]
 async fn synchronous_inner_service_events_are_inside_the_request_span() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let service = ObservabilityLayer::new(config).layer(SynchronousLoggingService);
@@ -659,8 +1293,11 @@ async fn synchronous_inner_service_events_are_inside_the_request_span() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "peer-ip")]
 async fn peer_and_unambiguous_user_agent_are_recorded_without_forwarded_headers() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default()
+        .with_peer_ip(true)
+        .with_user_agent(true);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
@@ -676,17 +1313,123 @@ async fn peer_and_unambiguous_user_agent_are_recorded_without_forwarded_headers(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         3210,
     )));
-    app.oneshot(request)
-        .await
-        .expect("response")
-        .into_body()
-        .collect()
-        .await
-        .expect("body");
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
     let records = capture.records();
-    assert_eq!(records[0]["remote_ip"], "127.0.0.1");
+    assert_eq!(records[0]["peer_ip"], "127.0.0.1");
     assert_eq!(records[0]["user_agent"], "agent/1");
     assert!(records[0].to_string().find("203.0.113.7").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "peer-ip")]
+async fn identifying_metadata_is_default_off_and_independently_opt_in() {
+    let default = privacy_record(ObservabilityConfig::default()).await;
+    assert_eq!(default["path_template"], "/items/{id}");
+    for field in ["path", "peer_ip", "user_agent"] {
+        assert!(default.get(field).is_none(), "default leaked {field}");
+    }
+    assert!(!default.to_string().contains("query"));
+    assert!(!default.to_string().contains("203.0.113.7"));
+
+    let raw_path = privacy_record(ObservabilityConfig::default().with_raw_path(true)).await;
+    assert_eq!(raw_path["path"], "/items/42");
+    assert!(raw_path.get("peer_ip").is_none());
+    assert!(raw_path.get("user_agent").is_none());
+    assert!(!raw_path.to_string().contains("secret=query"));
+
+    let peer_ip = privacy_record(ObservabilityConfig::default().with_peer_ip(true)).await;
+    assert_eq!(peer_ip["peer_ip"], "127.0.0.1");
+    assert!(peer_ip.get("path").is_none());
+    assert!(peer_ip.get("user_agent").is_none());
+    assert!(!peer_ip.to_string().contains("203.0.113.7"));
+
+    let user_agent = privacy_record(ObservabilityConfig::default().with_user_agent(true)).await;
+    assert_eq!(user_agent["user_agent"], "agent/1");
+    assert!(user_agent.get("path").is_none());
+    assert!(user_agent.get("peer_ip").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ambiguous_or_non_text_user_agent_is_omitted() {
+    let config = ObservabilityConfig::default().with_user_agent(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    let mut duplicate = Request::builder()
+        .uri("/")
+        .header("user-agent", "first-agent")
+        .body(Body::empty())
+        .expect("request");
+    duplicate
+        .headers_mut()
+        .append("user-agent", HeaderValue::from_static("second-agent"));
+    app.clone().oneshot(duplicate).await.expect("response");
+
+    let request = Request::builder()
+        .uri("/")
+        .header(
+            "user-agent",
+            HeaderValue::from_bytes(&[0xff]).expect("opaque header value"),
+        )
+        .body(Body::empty())
+        .expect("request");
+    app.oneshot(request).await.expect("response");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.get("user_agent").is_none())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn enabled_single_text_user_agent_is_recorded() {
+    let config = ObservabilityConfig::default().with_user_agent(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("user-agent", "agent/1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["user_agent"], "agent/1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_record_omits_peer_ip() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].get("peer_ip").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -729,7 +1472,7 @@ async fn outer_observability_records_recovered_panics_and_timeouts_with_final_st
             .await
             .expect("recovered response");
         assert_eq!(response.status(), expected);
-        response.into_body().collect().await.expect("body");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
     }
 
     let access = capture
@@ -751,7 +1494,7 @@ async fn outer_observability_records_recovered_panics_and_timeouts_with_final_st
 
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_an_unpolled_service_future_still_emits_once() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::ERROR);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let mut service =
@@ -764,6 +1507,7 @@ async fn dropping_an_unpolled_service_future_still_emits_once() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["level"], "WARN");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
     assert!(records[0].get("status").is_none());
 }
@@ -771,19 +1515,16 @@ async fn dropping_an_unpolled_service_future_still_emits_once() {
 #[tokio::test(flavor = "current_thread")]
 async fn custom_header_validator_and_response_header_configuration_are_effective() {
     let config = ObservabilityConfig::default()
-        .with_request_id_header("x-correlation-id")
-        .expect("valid custom header")
-        .with_request_id_validator(|value| value.starts_with("custom-"))
-        .with_request_id_generator(|| Some("custom-generated".to_owned()));
-    assert!(
-        ObservabilityConfig::default()
-            .with_request_id_header("not a header")
-            .is_err()
-    );
+        .with_request_id_header(HeaderName::from_static("x-correlation-id"))
+        .with_request_id_validator(|value| value.as_str().starts_with("custom-"))
+        .with_request_id_generator(|| {
+            Some(RequestId::parse("custom-generated").expect("valid generated ID"))
+        });
+    assert!(HeaderName::try_from("not a header").is_err());
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
     let app = Router::new()
-        .route("/", get(context_handler))
+        .route("/", get(custom_identity_handler))
         .layer(ObservabilityLayer::new(config));
     let response = app
         .oneshot(
@@ -797,25 +1538,28 @@ async fn custom_header_validator_and_response_header_configuration_are_effective
         .expect("response");
     assert_eq!(response.headers()["x-correlation-id"], "custom-generated");
     assert!(response.headers().get("x-request-id").is_none());
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    assert_eq!(body, "custom-generated|custom-generated");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "custom-generated|1|true");
 
     let disabled = ObservabilityConfig::default().with_response_header(false);
     let capture = Capture::default();
     let _guard = subscriber(&disabled, capture).set_default();
     let app = Router::new()
-        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/", get(canonical_identity_handler))
         .layer(ObservabilityLayer::new(disabled));
     let response = app
         .oneshot(Request::new(Body::empty()))
         .await
         .expect("response");
     assert!(response.headers().get("x-request-id").is_none());
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    let body = String::from_utf8(body.to_vec()).expect("context body");
+    let fields = body.split('|').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3);
+    let request_id = fields[0];
+    assert_eq!(fields[1], "1");
+    assert_eq!(fields[2], request_id);
+    assert!(RequestId::parse(request_id).is_ok());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -855,14 +1599,9 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
         .expect("request");
     request
         .extensions_mut()
-        .insert(OperationId::new("list-items"));
-    app.oneshot(request)
-        .await
-        .expect("response")
-        .into_body()
-        .collect()
-        .await
-        .expect("body");
+        .insert(OperationId::from_static("list-items"));
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
 
     let records = capture.records();
     let record = &records[0];
@@ -885,7 +1624,7 @@ async fn response_operation_id_overrides_preseeded_request_operation_id() {
             "/",
             get(|| async {
                 (
-                    Extension(OperationId::new("route-list-items")),
+                    Extension(OperationId::from_static("route-list-items")),
                     StatusCode::NO_CONTENT,
                 )
             }),
@@ -894,7 +1633,7 @@ async fn response_operation_id_overrides_preseeded_request_operation_id() {
     let mut request = Request::new(Body::empty());
     request
         .extensions_mut()
-        .insert(OperationId::new("preseeded-operation"));
+        .insert(OperationId::from_static("preseeded-operation"));
 
     app.oneshot(request).await.expect("response");
 
@@ -950,9 +1689,57 @@ fn formatter_writes_each_ndjson_event_once() {
     assert_eq!(records[0]["answer"], 42);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn immediate_writer_failure_does_not_change_the_http_result() {
+    let writer = FailingCapture {
+        state: Arc::new(Mutex::new(FailingWriterState::default())),
+        prefix_len: 0,
+    };
+    let config = ObservabilityConfig::default();
+    let layer = config.json_layer(writer.clone()).log_internal_errors(false);
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+    let app = Router::new()
+        .route("/", get(|| async { (StatusCode::OK, "ok") }))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("writer failure must not replace the response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), 1_024).await.expect("body"),
+        "ok"
+    );
+    let state = writer.state.lock().expect("failing writer lock");
+    assert_eq!(state.calls, 1);
+    assert!(state.bytes.is_empty());
+}
+
+#[test]
+fn partial_writer_failure_is_not_retried() {
+    let writer = FailingCapture {
+        state: Arc::new(Mutex::new(FailingWriterState::default())),
+        prefix_len: 5,
+    };
+    let layer = ObservabilityConfig::default()
+        .json_layer(writer.clone())
+        .log_internal_errors(false);
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+    tracing::info!(
+        private_value = "must-not-enter-diagnostics",
+        "partial write"
+    );
+
+    let state = writer.state.lock().expect("failing writer lock");
+    assert_eq!(state.calls, 2);
+    assert_eq!(state.bytes.len(), 5);
+}
+
 #[test]
 fn gcp_uses_canonical_cloud_logging_severity_names() {
-    let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
 
@@ -968,6 +1755,74 @@ fn gcp_uses_canonical_cloud_logging_severity_names() {
         .map(|record| record["severity"].as_str().expect("severity"))
         .collect::<Vec<_>>();
     assert_eq!(severities, ["DEBUG", "DEBUG", "INFO", "WARNING", "ERROR"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn gcp_health_route_emits_correlated_application_and_terminal_records() {
+    let (status, body, records) = gcp_health_records(LevelFilter::DEBUG).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["severity"], "INFO");
+    assert_eq!(records[0]["message"], "health check");
+    assert_eq!(records[0]["service_name"], "example-service");
+    assert_eq!(records[0]["service_version"], "0.3.0");
+    assert_eq!(records[0]["health_status"], "ok");
+    assert_eq!(records[1]["severity"], "DEBUG");
+    assert_eq!(records[1]["message"], "dependency check");
+    assert_eq!(records[1]["dependency"], "database");
+    assert_eq!(records[1]["dependency_status"], "ok");
+    assert_eq!(records[1]["check_duration_ms"], 3);
+    assert!(records[1]["check_duration_ms"].is_u64());
+
+    for record in &records {
+        assert_eq!(record["request_id"], "health-example");
+        assert_eq!(record["correlation_id"], "health-example");
+    }
+    let terminal = &records[2];
+    assert_eq!(terminal["severity"], "INFO");
+    assert_eq!(terminal["message"], "request completed");
+    assert_eq!(terminal["path_template"], "/health");
+    assert_eq!(terminal["httpRequest"]["requestMethod"], "GET");
+    assert_eq!(terminal["httpRequest"]["requestUrl"], "/health");
+    assert_eq!(terminal["httpRequest"]["status"], 200);
+    assert!(terminal["httpRequest"]["status"].is_u64());
+    assert!(terminal["httpRequest"]["latency"].is_string());
+    for application_only in [
+        "service_name",
+        "service_version",
+        "health_status",
+        "dependency",
+        "dependency_status",
+        "check_duration_ms",
+    ] {
+        assert!(terminal.get(application_only).is_none());
+    }
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["message"] == "request completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn gcp_health_route_respects_info_filter() {
+    let (status, body, records) = gcp_health_records(LevelFilter::INFO).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["message"], "health check");
+    assert_eq!(records[1]["message"], "request completed");
+    assert!(
+        records
+            .iter()
+            .all(|record| record["request_id"] == "health-example")
+    );
+    let serialized = serde_json::to_string(&records).expect("records serialize");
+    assert!(!serialized.contains("dependency check"));
+    assert!(!serialized.contains("check_duration_ms"));
 }
 
 #[tokio::test(flavor = "current_thread")]

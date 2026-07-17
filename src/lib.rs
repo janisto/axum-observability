@@ -5,8 +5,24 @@
 //! terminal access event after the response body completes or is abandoned.
 //! [`JsonLayer`] formats those records and application `tracing` events without
 //! installing a global subscriber.
+//!
+//! ```
+//! use axum::{Router, routing::get};
+//! use axum_observability::{ObservabilityConfig, ObservabilityLayer};
+//! use tracing_subscriber::prelude::*;
+//!
+//! let config = ObservabilityConfig::default();
+//! let subscriber = tracing_subscriber::registry()
+//!     .with(config.json_layer(std::io::sink));
+//! let app: Router = Router::new()
+//!     .route("/health", get(|| async { "ok" }))
+//!     .layer(ObservabilityLayer::new(config));
+//!
+//! # let _ = (subscriber, app);
+//! ```
 
 #![forbid(unsafe_code)]
+#![warn(clippy::print_stdout)]
 
 mod context;
 mod formatter;
@@ -14,18 +30,18 @@ mod middleware;
 mod request_id;
 mod trace_context;
 
-pub use context::{OperationId, RequestContext, TraceContext};
+pub use context::{MissingRequestContext, OperationId, RequestContext, TraceContext};
 pub use formatter::JsonLayer;
-pub use middleware::{ObservabilityConfig, ObservabilityLayer};
-pub use request_id::is_valid_request_id;
-pub use trace_context::{parse_traceparent, parse_tracestate};
+pub use middleware::{ObservabilityConfig, ObservabilityLayer, ObservabilityService};
+pub use request_id::{InvalidRequestId, RequestId};
 
 /// Structured logging field convention.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Preset {
+#[non_exhaustive]
+pub enum FieldConvention {
     /// Provider-neutral fields using `level`.
     #[default]
-    Default,
+    Generic,
     /// Google Cloud structured logging fields using `severity` and
     /// `httpRequest`.
     Gcp,
@@ -33,4 +49,14 @@ pub enum Preset {
     Aws,
     /// Azure-oriented operation correlation fields.
     Azure,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FieldConvention;
+
+    #[test]
+    fn generic_is_the_default_field_convention() {
+        assert_eq!(FieldConvention::default(), FieldConvention::Generic);
+    }
 }

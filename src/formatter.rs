@@ -1,23 +1,42 @@
-use std::{fmt, io::Write};
+use std::{fmt, io, io::Write};
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{Event, Subscriber, field::Visit, span::Attributes};
 use tracing_subscriber::{Layer, fmt::MakeWriter, layer::Context, registry::LookupSpan};
 
-use crate::Preset;
+use crate::FieldConvention;
 
 /// A composable newline-delimited JSON `tracing` layer.
+#[must_use]
 pub struct JsonLayer<W> {
     writer: W,
-    preset: Preset,
+    field_convention: FieldConvention,
+    log_internal_errors: bool,
 }
 
 impl<W> JsonLayer<W> {
-    /// Creates a JSON layer using the supplied writer and field preset.
-    #[must_use]
-    pub const fn new(writer: W, preset: Preset) -> Self {
-        Self { writer, preset }
+    /// Creates a JSON layer using the supplied writer and field convention.
+    #[must_use = "the JSON layer must be installed on a subscriber"]
+    pub const fn new(writer: W, field_convention: FieldConvention) -> Self {
+        Self {
+            writer,
+            field_convention,
+            log_internal_errors: true,
+        }
+    }
+
+    /// Enables or disables redacted formatter diagnostics on stderr.
+    ///
+    /// Diagnostics contain only the failed stage and, for writes, the
+    /// [`io::ErrorKind`]. They never include an event payload or the writer's
+    /// error text, and reporting does not use `tracing` or the configured
+    /// writer.
+    #[must_use = "the configured JSON layer must be installed on a subscriber"]
+    pub fn log_internal_errors(mut self, enabled: bool) -> Self {
+        self.log_internal_errors = enabled;
+        self
     }
 }
 
@@ -25,7 +44,8 @@ impl<W> fmt::Debug for JsonLayer<W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("JsonLayer")
-            .field("preset", &self.preset)
+            .field("field_convention", &self.field_convention)
+            .field("log_internal_errors", &self.log_internal_errors)
             .finish_non_exhaustive()
     }
 }
@@ -79,30 +99,30 @@ where
                 output.insert(key, value);
             }
         }
-        output.insert(
-            "timestamp".to_owned(),
-            Value::String(
-                OffsetDateTime::now_utc()
-                    .format(&Rfc3339)
-                    .expect("RFC 3339 supports all UTC system timestamps"),
-            ),
-        );
+        let timestamp = match format_timestamp(OffsetDateTime::now_utc()) {
+            Ok(timestamp) => timestamp,
+            Err(failure) => {
+                let _ = self.report_internal_failure(failure);
+                return;
+            }
+        };
+        output.insert("timestamp".to_owned(), Value::String(timestamp));
         output.insert(
             "target".to_owned(),
             Value::String(event.metadata().target().to_owned()),
         );
-        let level_key = if self.preset == Preset::Gcp {
+        let level_key = if self.field_convention == FieldConvention::Gcp {
             "severity"
         } else {
             "level"
         };
         output.insert(
             level_key.to_owned(),
-            Value::String(level_name(*event.metadata().level(), self.preset).to_owned()),
+            Value::String(level_name(*event.metadata().level(), self.field_convention).to_owned()),
         );
 
         if let Some(Value::Object(record)) = access_record {
-            merge_access_record(&mut output, record, self.preset);
+            merge_access_record(&mut output, record, self.field_convention);
         }
 
         for (key, value) in request_fields {
@@ -110,19 +130,71 @@ where
                 output.insert(key, value);
             }
         }
-        add_provider_trace_fields(&mut output, self.preset);
+        add_provider_trace_fields(&mut output, self.field_convention);
 
-        let Ok(mut line) = serde_json::to_vec(&output) else {
-            return;
+        let mut line = match serialize_json(&output) {
+            Ok(line) => line,
+            Err(failure) => {
+                let _ = self.report_internal_failure(failure);
+                return;
+            }
         };
         line.push(b'\n');
         let mut writer = self.writer.make_writer_for(event.metadata());
-        let _ = writer.write_all(&line);
+        if let Err(error) = writer.write_all(&line) {
+            let _ = self.report_internal_failure(InternalFailure::Write(error.kind()));
+        }
     }
 }
 
-fn level_name(level: tracing::Level, preset: Preset) -> &'static str {
-    if preset != Preset::Gcp {
+impl<W> JsonLayer<W> {
+    #[must_use]
+    fn report_internal_failure(&self, failure: InternalFailure) -> bool {
+        let Some(diagnostic) = internal_diagnostic(self.log_internal_errors, failure) else {
+            return false;
+        };
+        let _ = io::stderr().lock().write_all(diagnostic.as_bytes());
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InternalFailure {
+    Timestamp,
+    Serialization,
+    Write(io::ErrorKind),
+}
+
+fn format_timestamp(timestamp: OffsetDateTime) -> Result<String, InternalFailure> {
+    timestamp
+        .format(&Rfc3339)
+        .map_err(|_| InternalFailure::Timestamp)
+}
+
+fn serialize_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, InternalFailure> {
+    serde_json::to_vec(value).map_err(|_| InternalFailure::Serialization)
+}
+
+fn internal_diagnostic(enabled: bool, failure: InternalFailure) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let diagnostic = match failure {
+        InternalFailure::Timestamp => {
+            "axum-observability: JSON event dropped; stage=timestamp\n".to_owned()
+        }
+        InternalFailure::Serialization => {
+            "axum-observability: JSON event dropped; stage=serialization\n".to_owned()
+        }
+        InternalFailure::Write(kind) => {
+            format!("axum-observability: JSON event dropped; stage=write; kind={kind:?}\n")
+        }
+    };
+    Some(diagnostic)
+}
+
+fn level_name(level: tracing::Level, convention: FieldConvention) -> &'static str {
+    if convention != FieldConvention::Gcp {
         return level.as_str();
     }
 
@@ -137,7 +209,7 @@ fn level_name(level: tracing::Level, preset: Preset) -> &'static str {
 fn merge_access_record(
     output: &mut Map<String, Value>,
     mut record: Map<String, Value>,
-    preset: Preset,
+    convention: FieldConvention,
 ) {
     let enrichment = record.remove("enrichment");
     for (key, value) in record {
@@ -158,12 +230,12 @@ fn merge_access_record(
         }
     }
 
-    if preset == Preset::Gcp {
+    if convention == FieldConvention::Gcp {
         let mut http_request = Map::new();
         copy_as(output, &mut http_request, "method", "requestMethod");
         copy_as(output, &mut http_request, "path", "requestUrl");
         copy_as(output, &mut http_request, "status", "status");
-        copy_as(output, &mut http_request, "remote_ip", "remoteIp");
+        copy_as(output, &mut http_request, "peer_ip", "remoteIp");
         copy_as(output, &mut http_request, "user_agent", "userAgent");
         if let Some(duration) = output.get("duration_ms").and_then(Value::as_f64) {
             http_request.insert(
@@ -186,13 +258,13 @@ fn copy_as(
     }
 }
 
-fn add_provider_trace_fields(output: &mut Map<String, Value>, preset: Preset) {
+fn add_provider_trace_fields(output: &mut Map<String, Value>, convention: FieldConvention) {
     let Some(trace_id) = validated_trace_id(output) else {
         return;
     };
-    match preset {
-        Preset::Default => {}
-        Preset::Gcp => {
+    match convention {
+        FieldConvention::Generic => {}
+        FieldConvention::Gcp => {
             output.insert(
                 "logging.googleapis.com/trace".to_owned(),
                 Value::String(trace_id),
@@ -201,13 +273,13 @@ fn add_provider_trace_fields(output: &mut Map<String, Value>, preset: Preset) {
                 output.insert("logging.googleapis.com/trace_sampled".to_owned(), sampled);
             }
         }
-        Preset::Aws => {
+        FieldConvention::Aws => {
             output.insert(
                 "xray_trace_id".to_owned(),
                 Value::String(format!("1-{}-{}", &trace_id[..8], &trace_id[8..])),
             );
         }
-        Preset::Azure => {
+        FieldConvention::Azure => {
             output.insert("operation_Id".to_owned(), Value::String(trace_id));
             if let Some(parent_id) = output.get("parent_id").cloned() {
                 output.insert("operation_ParentId".to_owned(), parent_id);
@@ -254,7 +326,7 @@ fn is_reserved(key: &str) -> bool {
                 | "operation_id"
                 | "status"
                 | "duration_ms"
-                | "remote_ip"
+                | "peer_ip"
                 | "user_agent"
                 | "terminal_reason"
                 | "error"
@@ -325,5 +397,75 @@ impl Visit for JsonVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
         self.fields
             .insert(field.name().to_owned(), Value::String(format!("{value:?}")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::{Serialize, Serializer};
+    use time::{OffsetDateTime, UtcOffset};
+
+    use super::{InternalFailure, format_timestamp, internal_diagnostic, serialize_json};
+
+    struct SerializationFailure;
+
+    impl Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom("secret serialization detail"))
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_suppressible_fixed_and_redacted() {
+        assert_eq!(internal_diagnostic(false, InternalFailure::Timestamp), None);
+        assert_eq!(
+            internal_diagnostic(true, InternalFailure::Timestamp).as_deref(),
+            Some("axum-observability: JSON event dropped; stage=timestamp\n")
+        );
+        assert_eq!(
+            internal_diagnostic(true, InternalFailure::Serialization).as_deref(),
+            Some("axum-observability: JSON event dropped; stage=serialization\n")
+        );
+        let write = internal_diagnostic(
+            true,
+            InternalFailure::Write(std::io::ErrorKind::PermissionDenied),
+        )
+        .expect("write diagnostic");
+        assert_eq!(
+            write,
+            "axum-observability: JSON event dropped; stage=write; kind=PermissionDenied\n"
+        );
+        assert!(!write.contains("request"));
+
+        let disabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic)
+            .log_internal_errors(false);
+        assert!(!disabled.report_internal_failure(InternalFailure::Timestamp));
+        let enabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic);
+        assert!(enabled.report_internal_failure(InternalFailure::Timestamp));
+    }
+
+    #[test]
+    fn out_of_range_timestamp_uses_the_diagnostic_path() {
+        let outside_rfc3339 = OffsetDateTime::UNIX_EPOCH.to_offset(
+            UtcOffset::from_hms(1, 2, 3).expect("valid offset with unsupported seconds"),
+        );
+        assert_eq!(
+            format_timestamp(outside_rfc3339),
+            Err(InternalFailure::Timestamp)
+        );
+    }
+
+    #[test]
+    fn serialization_failure_is_redacted_to_its_stage() {
+        assert_eq!(
+            serialize_json(&SerializationFailure),
+            Err(InternalFailure::Serialization)
+        );
+        let diagnostic = internal_diagnostic(true, InternalFailure::Serialization)
+            .expect("serialization diagnostic");
+        assert!(!diagnostic.contains("secret serialization detail"));
     }
 }

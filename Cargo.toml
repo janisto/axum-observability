@@ -1,8 +1,8 @@
 [package]
 name = "axum-observability"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.96.1"
+rust-version = "1.97.0"
 description = "Axum middleware for request IDs, trace correlation, and structured access logs."
 license = "MIT"
 repository = "https://github.com/janisto/axum-observability"
@@ -13,42 +13,86 @@ keywords = ["axum", "logging", "middleware", "observability", "tracing"]
 categories = ["web-programming::http-server", "development-tools::debugging"]
 publish = ["crates-io"]
 include = [
-  "src/**",
-  "examples/**",
-  "Cargo.toml",
-  "Cargo.lock",
-  "README.md",
-  "CHANGELOG.md",
-  "EXAMPLES.md",
-  "LICENSE",
+    "src/**",
+    "examples/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "EXAMPLES.md",
+    "LICENSE",
 ]
 
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    "axum_core::body::Body",
+    "axum_core::extract::FromRequestParts",
+    "axum_core::response::into_response::IntoResponse",
+    "http::header::name::HeaderName",
+    "http::request::Request",
+    "http::response::Response",
+    "http::status::StatusCode",
+    "serde_json::value::Value",
+    "tower_layer::Layer",
+    "tower_service::Service",
+    "tracing_core::metadata::Level",
+    "tracing_core::subscriber::Subscriber",
+    "tracing_subscriber::fmt::writer::MakeWriter",
+    "tracing_subscriber::layer::Layer",
+    "tracing_subscriber::registry::LookupSpan",
+]
+
+[features]
+default = []
+peer-ip = ["axum/tokio"]
+
 [dependencies]
-axum = "=0.8.9"
-http-body = "=1.1.0"
-pin-project-lite = "=0.2.17"
-serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.150"
-time = { version = "=0.3.53", features = ["formatting"] }
-tower = "=0.5.3"
-tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["fmt", "registry"] }
-uuid = { version = "=1.24.0", features = ["v4"] }
+axum = { version = "0.8.0", default-features = false, features = ["matched-path"] }
+http-body = "1.1.0"
+pin-project-lite = "0.2.17"
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
+time = { version = "0.3.53", default-features = false, features = ["formatting"] }
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
+uuid = { version = "1.24.0", default-features = false, features = ["v4"] }
 
 [dev-dependencies]
-http-body-util = "=0.1.4"
-tokio = { version = "=1.52.4", features = ["macros", "rt-multi-thread", "time"] }
-tower = { version = "=0.5.3", features = ["util"] }
-tower-http = { version = "=0.7.0", features = ["catch-panic", "cors", "limit", "timeout"] }
-tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "registry"] }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+tokio = { version = "1.52.4", default-features = false, features = ["macros", "rt", "time"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+tower-http = { version = "0.7.0", default-features = false, features = ["catch-panic", "timeout"] }
 
 [profile.mutants]
 inherits = "test"
 debug = 0
 
 [lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
 missing_docs = "warn"
+unreachable_pub = "warn"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+equatable_if_let = "warn"
+exit = "warn"
+imprecise_flops = "warn"
+lossy_float_literal = "warn"
+mem_forget = "warn"
+needless_pass_by_ref_mut = "warn"
+redundant_clone = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+str_to_string = "warn"
+suboptimal_flops = "warn"
+todo = "warn"
+use_self = "warn"
+verbose_file_reads = "warn"

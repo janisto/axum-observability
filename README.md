@@ -21,7 +21,7 @@ fields, and one structured terminal access record. Application and access logs
 can share the same correlation metadata, making records from a request easier
 to find and understand.
 
-Cloud presets map the same contract to provider-oriented fields without
+Field conventions map the same contract to provider-oriented fields without
 coupling application code to a cloud SDK. The crate focuses on structured
 logging and request correlation: it does not create spans for a tracing
 backend, configure OpenTelemetry, export metrics, or ship logs.
@@ -37,24 +37,27 @@ This is an independently maintained crate, not official Axum middleware.
 
 ## Requirements and installation
 
-The minimum supported Rust version is 1.96.1. The first functional release is
-v0.2.0 and targets Axum 0.8.9.
+The minimum supported Rust version is 1.97.0. Version 0.3.0 supports the Axum
+0.8 release line, including Axum 0.8.0 with only its `matched-path` feature.
 
 ```toml
 [dependencies]
-axum = "0.8.9"
-axum-observability = "0.2.0"
+axum = "0.8"
+axum-observability = "0.3.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ```
 
-While the crate is below 1.0, minor versions may evolve the public API. Patch
-versions preserve documented behavior.
+Version 0.3.0 intentionally resets the pre-1.0 API and structured-log contract
+to encode request-ID and operation-ID invariants and minimize captured request
+data by default. No deprecated aliases or compatibility layer are provided.
+While the crate is below 1.0, later minor versions may evolve the public API;
+patch versions preserve documented behavior.
 
 ## GCP setup
 
 When this documentation shows one configuration, it uses GCP. Complete
-provider-neutral, GCP, AWS, Azure, and local-wrapper examples are available in
+provider-neutral, GCP, AWS, and Azure configuration examples are available in
 [`examples`](examples) and [EXAMPLES.md](EXAMPLES.md).
 
 ```rust
@@ -62,7 +65,7 @@ use axum::{Router, routing::get};
 use axum_observability as obs;
 use tracing_subscriber::prelude::*;
 
-let config = obs::ObservabilityConfig::default().with_preset(obs::Preset::Gcp);
+let config = obs::ObservabilityConfig::default().with_field_convention(obs::FieldConvention::Gcp);
 
 tracing_subscriber::registry()
     .with(
@@ -96,6 +99,10 @@ async fn handler(context: RequestContext) {
 ```
 
 Event fields cannot overwrite package-owned request correlation values.
+Without `ObservabilityLayer`, extraction rejects with the public
+`MissingRequestContext` error, status 500, and the fixed body
+`request context unavailable`. This makes middleware misconfiguration
+diagnosable without reflecting request data.
 
 ## Middleware placement
 
@@ -139,9 +146,16 @@ when it contains 1-128 ASCII URI-unreserved characters: `A-Z`, `a-z`, `0-9`,
 otherwise invalid values are replaced. The fallback is 128 random bits encoded
 as 32 lowercase hexadecimal characters.
 
+Application configuration and tests can validate IDs through
+`RequestId::parse`, `FromStr`, or `TryFrom`; invalid values return the public,
+non-sensitive `InvalidRequestId` error. `RequestId` has no unchecked public
+constructor.
+
 The selected value is available from:
 
-- the `RequestContext` extractor and request extension;
+- the validated `RequestId` in the `RequestContext` extractor and request
+  extension;
+- exactly one canonical configured header before downstream service code runs;
 - `request_id()` and `correlation_id()`;
 - application events inside an enabled package request span;
 - the terminal access record; and
@@ -149,13 +163,15 @@ The selected value is available from:
 
 Configuration can change the request/response header name, disable the response
 header, narrow validation, or supply a fallible generator. Generated values
-still pass the package baseline. A generator is tried at most twice before the
-package-owned fallback is used, and callback failure never produces an invalid
-ID.
+use `RequestId`, making baseline validity explicit. A generator is invoked once
+per replacement request before the package-owned fallback is used, and callback
+failure never produces an invalid ID.
 
 `traceparent` parsing rejects duplicates, uppercase hexadecimal, zero trace or
 parent IDs, invalid framing and flags, and oversized input. Version `00` must
-use its exact framing; well-formed future-version extensions are retained.
+use its exact framing. Versions `01` through `fe` validate the known prefix and
+treat a delimiter plus any remaining extension bytes as opaque, including a
+trailing delimiter.
 Repeated `tracestate` values are combined in wire order and accepted only when
 their grammar, unique-key rule, 32-member limit, and 512-byte limit pass. An
 invalid `tracestate` is discarded without invalidating a valid `traceparent`.
@@ -179,28 +195,36 @@ During a request, events inside the enabled package span also contain
 `request_id` and `correlation_id`. Valid W3C context adds `trace_id`,
 `parent_id`, `trace_flags`, and `trace_sampled`.
 
-The terminal record always has `message = "request completed"` and includes:
+The terminal record always has `message = "request completed"`. Its common
+semantic fields are:
 
-| Field | Meaning |
-| --- | --- |
-| `method` | HTTP method |
-| `path` | Escaped concrete path without query string |
-| `path_template` | Axum `MatchedPath`, when available |
-| `operation_id` | Explicit `OperationId` request or response extension |
-| `status` | Final response status when known |
-| `duration_ms` | Non-negative handling and streaming time in milliseconds |
-| `remote_ip` | `ConnectInfo<SocketAddr>` peer IP, when present |
-| `user_agent` | One unambiguous raw User-Agent value |
-| `terminal_reason` | `body_error`, `service_error`, or `response_dropped` on abnormal completion |
-| `error` | Controlled package error description on body or service failure |
+| Field | JSON type | Presence and meaning |
+| --- | --- | --- |
+| `request_id` | string | Always; the validated or generated request ID |
+| `correlation_id` | string | Always; trace ID when valid W3C context exists, otherwise request ID |
+| `trace_id`, `parent_id` | string | Only with valid W3C context |
+| `trace_flags` | number | Only with valid W3C context; the flags byte |
+| `trace_sampled` | boolean | Only with valid W3C context |
+| `method` | string | Always; HTTP method |
+| `path_template` | string | When Axum's `MatchedPath` is available |
+| `path` | string | Only with `with_raw_path(true)`; query-free concrete path |
+| `operation_id` | string | When an `OperationId` request or response extension exists |
+| `status` | number | When a response status is known |
+| `duration_ms` | number | Always; non-negative handling and streaming time |
+| `peer_ip` | string | Only with the `peer-ip` feature, `with_peer_ip(true)`, and `ConnectInfo` |
+| `user_agent` | string | Only with `with_user_agent(true)` and one text header value |
+| `terminal_reason` | string | Only for `body_error`, `service_error`, or `response_dropped` |
+| `error` | string | Controlled package text only for body or service failure |
 
+Optional values are omitted; the formatter does not emit `null` placeholders.
 Normal completion omits `terminal_reason` and `error`. The default level is
 `ERROR` for 5xx, `WARN` for 4xx, and `INFO` otherwise. Application events cannot
 replace package correlation, envelope, or provider fields. Access enrichment
-cannot replace terminal access fields either.
+cannot replace terminal access fields either; package-owned fields win.
 
-`path_template` is the low-cardinality aggregation key. Concrete `path` remains
-useful for individual-request diagnostics and can have unbounded cardinality.
+`path_template` is the default low-cardinality aggregation key. Concrete `path`
+can have unbounded cardinality and may contain identifying data, so it is off by
+default.
 
 ## Operation IDs
 
@@ -213,7 +237,7 @@ use axum::{Extension, http::StatusCode};
 use axum_observability::OperationId;
 
 async fn list_items() -> (Extension<OperationId>, StatusCode) {
-    (Extension(OperationId::new("list-items")), StatusCode::OK)
+    (Extension(OperationId::from_static("list-items")), StatusCode::OK)
 }
 ```
 
@@ -221,24 +245,28 @@ An `OperationId` already present before the request reaches observability is
 also supported. A response extension takes precedence because it is closest to
 the selected route.
 
-## Cloud presets
+## Field conventions
 
-Select one preset on the shared `ObservabilityConfig`; `json_layer` and the
-terminal middleware then use the same field convention.
+Select one convention on the shared `ObservabilityConfig`; `json_layer` and the
+terminal middleware then map the same captured semantic record.
 
-- `Gcp` uses `severity`, `logging.googleapis.com/trace`,
+- `Generic` is the provider-neutral default and uses `level`.
+- `Gcp` replaces `level` with `severity`, adds
+  `logging.googleapis.com/trace`,
   `logging.googleapis.com/trace_sampled`, and a structured `httpRequest` access
-  field. The trace field is always the bare validated 32-character W3C trace
-  ID. The crate never prepends `projects/{project}/traces/` and never emits a
-  fake `logging.googleapis.com/spanId`.
+  object. `httpRequest` maps enabled `path`, `peer_ip`, and `user_agent` to
+  `requestUrl`, `remoteIp`, and `userAgent`; method, status, and latency use
+  `requestMethod`, numeric `status`, and a seconds string. The trace field is
+  the bare validated 32-character W3C trace ID. The crate never emits a fake
+  `logging.googleapis.com/spanId`.
 - `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. It does not create an X-Ray
   segment or parse `X-Amzn-Trace-Id`.
 - `Azure` adds `operation_Id` and `operation_ParentId`. It does not initialize
   an Azure SDK or parse legacy `Request-Id` headers.
-- `Default` emits provider-neutral fields using `level`.
 
-Provider fields are derived only from a validated W3C trace ID. They correlate
-logs; trace creation, sampling policy, and export remain application concerns.
+Provider trace fields are omitted without valid W3C context and never change
+which request metadata is captured. They correlate logs; trace creation,
+sampling policy, and export remain application concerns.
 Google Cloud's current [preferred trace field
 format](https://docs.cloud.google.com/trace/docs/trace-log-integration) is the
 bare trace ID.
@@ -261,9 +289,11 @@ Status and duration reflect the latest trustworthy state. If the response was
 never produced, status is omitted. The monotonic clock is saturating, so a bad
 custom clock cannot produce a negative duration.
 
-Custom generator, validator, level-mapper, and access-enricher panics are
-contained with safe fallback behavior. A finish-time clock failure falls back
-to the request start; a custom clock must not panic when the request begins.
+Custom generator, validator, level-mapper, access-enricher, and clock panics
+are contained with safe fallback behavior. An initial clock failure uses the
+package monotonic clock; a finish-time failure falls back to the request start.
+This containment requires Rust's default `panic = "unwind"`; Rust code cannot
+recover from `panic = "abort"`.
 Formatter serialization and writer errors do not replace the HTTP response.
 Writer failures can still mean a log record was not delivered; applications
 remain responsible for choosing and monitoring the output destination.
@@ -274,28 +304,46 @@ remain responsible for choosing and monitoring the output destination.
 
 | Method | Default | Purpose |
 | --- | --- | --- |
-| `with_preset` | `Preset::Default` | Select one provider field convention |
+| `with_field_convention` | `FieldConvention::Generic` | Select one provider field convention |
 | `with_request_id_header` | `x-request-id` | Set the request and response correlation header |
 | `with_response_header` | `true` | Enable or disable response-header injection |
-| `with_request_id_generator` | random 128-bit ID | Supply a fallible generator, tried at most twice |
+| `with_raw_path` | `false` | Opt into query-free concrete path capture |
+| `with_peer_ip` | `false` | With the `peer-ip` feature, opt into trusted socket-peer capture |
+| `with_user_agent` | `false` | Opt into one unambiguous text User-Agent value |
+| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked once per replacement |
 | `with_request_id_validator` | accepts baseline | Narrow accepted IDs without weakening the baseline |
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |
 | `with_access_enricher` | no extra fields | Add synchronous application-owned terminal fields |
 
-Unknown options do not exist: configuration is compile-time checked. Invalid
-HTTP header names return an error immediately. Enrichment values must be safe
-to log; the crate does not redact application-owned fields.
+Unknown options do not exist: configuration is compile-time checked. The header
+setter accepts a validated `http::HeaderName`; use `HeaderName::from_static` or
+`HeaderName::try_from` at the configuration boundary:
+
+```rust
+use axum::http::HeaderName;
+use axum_observability::ObservabilityConfig;
+
+let config = ObservabilityConfig::default()
+    .with_request_id_header(HeaderName::from_static("x-correlation-id"));
+# let _: ObservabilityConfig = config;
+```
+
+Enrichment values must be safe to log; the crate does not redact
+application-owned fields.
 
 ## Proxy trust and privacy
 
-`remote_ip` comes only from Axum `ConnectInfo<SocketAddr>`. The crate never
+`peer_ip` comes only from Axum `ConnectInfo<SocketAddr>` when the `peer-ip`
+feature and runtime opt-in are both enabled. The crate never
 parses `Forwarded` or `X-Forwarded-For`, because trusting caller-controlled
 forwarding headers without a known proxy boundary permits spoofing. Configure
 trusted proxy handling before constructing `ConnectInfo` if the original client
 address is required.
 
-The terminal schema never logs query strings, request or response bodies,
+Raw paths, peer IPs, and User-Agent values are independently off by default;
+enabling any of them changes the application's privacy posture. The terminal
+schema never logs query strings, request or response bodies,
 cookies, authorization values, arbitrary headers, or forwarded-IP headers. The
 GCP request URL uses the same query-free concrete path.
 
@@ -311,48 +359,52 @@ data, and secrets out of those values.
 | WARN/ERROR access record lacks application span fields | INFO request span is filtered | Terminal correlation remains complete; enable `axum_observability::request=info` for correlated application events |
 | Timeout or recovered panic has the wrong status | Observability is inside response-producing middleware | Add `ObservabilityLayer` last so it wraps recovery and timeout layers |
 | `operation_id` is absent | A route middleware inserted it only on the consumed request | Return `Extension(OperationId)` on the response |
-| `remote_ip` is absent | No `ConnectInfo<SocketAddr>` extension exists | Serve the router with connect-info support or insert a trusted peer extension |
+| `peer_ip` is absent | The feature or runtime opt-in is disabled, or no `ConnectInfo<SocketAddr>` exists | Enable `peer-ip`, call `with_peer_ip(true)`, and provide a trusted peer extension |
 | Caller request ID is replaced | It is missing, duplicate, invalid, or rejected by custom policy | Send one URI-unreserved value of at most 128 bytes |
 | GCP trace link is absent | `traceparent` is missing or invalid | Send one valid lowercase W3C `traceparent`; do not provide a project-qualified value |
 | Duplicate framework access lines | Another access logger remains enabled | Disable the competing access logger when this crate owns terminal records |
 
 ## Compatibility and development
 
-The crate supports Rust 1.96.1 or newer and Axum 0.8.9. Beginning with 1.0.0,
-exported APIs, configuration defaults, structured fields, and supported runtime
-versions are compatibility contracts. Breaking changes require a new major
-version, explicit changelog coverage, and migration guidance.
+The crate supports Rust 1.97.0 or newer and the Axum 0.8 release line. The
+public `ObservabilityService` is the nameable Tower service produced by
+`ObservabilityLayer`. Beginning with 1.0.0, exported APIs, configuration
+defaults, structured fields, and supported runtime versions are compatibility
+contracts. Breaking changes require a new major version, explicit changelog
+coverage, and migration guidance.
 
 Development uses [just](https://github.com/casey/just). The normal gates are:
 
 ```bash
+brew install rust llvm actionlint zizmor
+```
+
+The Homebrew Rust and LLVM versions must match. The coverage recipes detect an
+active Homebrew Rust compiler and select Homebrew's `llvm-cov` and
+`llvm-profdata` automatically.
+
+```bash
 just qa
-just package-check
 ```
 
 `just qa` runs formatting, Clippy with warnings denied, tests, doctests,
-dependency policy, and the RustSec audit. `just package-check` creates the exact
-crate archive, verifies its allowlisted contents and size, compiles the packaged
-crate, and runs an isolated consumer against it. Maintainers should follow the
-public [release architecture and guide](RELEASE.md).
+dependency policy, the RustSec audit, [actionlint](https://github.com/rhysd/actionlint),
+and [zizmor](https://docs.zizmor.sh/). Maintainers should follow the public
+[release architecture and guide](RELEASE.md).
 
-## Mutation and fuzz testing
+## Property and mutation testing
 
-The crate has explicit mutation and parser-fuzzing campaigns:
+Stable property tests generate valid W3C trace context and exercise equivalent
+multi-header `tracestate` layouts as part of the normal test suite. Mutation
+testing remains an explicit maintainer campaign:
 
 ```bash
 just mutation
-just fuzz traceparent 30
 ```
 
-Mutation testing runs outside `just qa`; see [MUTATION.md](MUTATION.md) for the
-reviewed baseline and narrow exclusions. Add a behavioral test when a surviving
+Mutation testing runs outside `just qa`. Add a behavioral test when a surviving
 mutant exposes a real contract gap. Equivalent transformations do not need
 artificial assertions.
-
-Fuzz targets cover request IDs, `traceparent`, and `tracestate`. Fuzzing requires
-a Rust nightly toolchain for libFuzzer sanitizer instrumentation; the crate's
-build and MSRV remain on stable Rust.
 
 ## References
 
