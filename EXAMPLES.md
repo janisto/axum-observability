@@ -146,7 +146,7 @@ semantic macros for specific domain events.
 
 ## Per-project checklist
 
-- Use Rust 1.96.1 or newer.
+- Use Rust 1.97.0 or newer.
 - Use GCP when documentation needs one representative configuration.
 - Initialize the subscriber once at process startup, never in request code or a
   library.

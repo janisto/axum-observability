@@ -86,7 +86,7 @@ The **Publish to crates.io** job performs this sequence:
 2. requires a stable `vX.Y.Z` tag and verifies that it is an annotated Git tag;
 3. verifies that dereferencing the tag produces the checked-out commit and that
    the commit belongs to `origin/main`;
-4. installs Rust 1.96.1 with `rustfmt` and Clippy;
+4. installs Rust 1.97.0 with `rustfmt` and Clippy;
 5. reads package metadata with locked Cargo resolution and requires the package
    version to match the release tag exactly;
 6. runs formatting, Clippy with warnings denied, all targets and features,
@@ -286,10 +286,6 @@ Finally, verify that:
 - `cargo search axum-observability` and the crates.io index expose the version;
 - the changelog, release notes, rustdoc, and published behavior agree; and
 - the repository remains clean after verification.
-
-After functional v0.2.0 passes every verification, migrate
-`axum-playground` against exact registry version `=0.2.0`. Do not use a path or
-Git dependency as a pre-publication proof.
 
 ## Failure and recovery
 

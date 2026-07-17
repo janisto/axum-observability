@@ -37,7 +37,7 @@ This is an independently maintained crate, not official Axum middleware.
 
 ## Requirements and installation
 
-The minimum supported Rust version is 1.96.1. The first functional release is
+The minimum supported Rust version is 1.97.0. The first functional release is
 v0.2.0 and targets Axum 0.8.9.
 
 ```toml
@@ -318,7 +318,7 @@ data, and secrets out of those values.
 
 ## Compatibility and development
 
-The crate supports Rust 1.96.1 or newer and Axum 0.8.9. Beginning with 1.0.0,
+The crate supports Rust 1.97.0 or newer and Axum 0.8.9. Beginning with 1.0.0,
 exported APIs, configuration defaults, structured fields, and supported runtime
 versions are compatibility contracts. Breaking changes require a new major
 version, explicit changelog coverage, and migration guidance.
@@ -326,8 +326,12 @@ version, explicit changelog coverage, and migration guidance.
 Development uses [just](https://github.com/casey/just). The normal gates are:
 
 ```bash
-brew install actionlint zizmor
+brew install rust llvm actionlint zizmor
 ```
+
+The Homebrew Rust and LLVM versions must match. The coverage recipes detect an
+active Homebrew Rust compiler and select Homebrew's `llvm-cov` and
+`llvm-profdata` automatically.
 
 ```bash
 just qa

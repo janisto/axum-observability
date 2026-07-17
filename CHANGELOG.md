@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the minimum supported Rust version from 1.96.1 to 1.97.0 and aligned
+  local, CI, release, example, and issue-reporting guidance.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added

@@ -2,7 +2,7 @@
 name = "axum-observability"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.96.1"
+rust-version = "1.97.0"
 description = "Axum middleware for request IDs, trace correlation, and structured access logs."
 license = "MIT"
 repository = "https://github.com/janisto/axum-observability"

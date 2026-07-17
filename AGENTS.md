@@ -48,7 +48,8 @@ into human onboarding documentation.
 
 - Keep `plans/` ignored. Planning and mutation-campaign notes are local and
   must not ship in the crate or repository.
-- Preserve `#![forbid(unsafe_code)]` and use stable Rust APIs.
+- Preserve `#![forbid(unsafe_code)]`, the Rust 1.97.0 support line, and stable
+  Rust APIs.
 - Do not add OpenTelemetry, a cloud SDK, a global subscriber, or logging of
   queries, bodies, credentials, cookies, arbitrary headers, or forwarded IPs.
 - Treat exported APIs, structured log fields, defaults, and supported runtime
