@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Relaxed dependency requirements across the supported Axum 0.8 line, reduced
+  the default feature graph, and made peer-IP support an explicit `peer-ip`
+  feature.
 - Raised the minimum supported Rust version from 1.96.1 to 1.97.0 and aligned
   local, CI, release, example, and issue-reporting guidance.
 

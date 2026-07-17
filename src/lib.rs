@@ -7,6 +7,7 @@
 //! installing a global subscriber.
 
 #![forbid(unsafe_code)]
+#![warn(clippy::print_stdout)]
 
 mod context;
 mod formatter;

@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     fmt,
     future::Future,
-    net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::Arc,
@@ -10,16 +9,21 @@ use std::{
     time::Instant,
 };
 
+#[cfg(feature = "peer-ip")]
+use axum::extract::ConnectInfo;
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, MatchedPath},
+    extract::MatchedPath,
     http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header::USER_AGENT},
 };
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use pin_project_lite::pin_project;
 use serde::Serialize;
 use serde_json::Value;
-use tower::{Layer, Service};
+#[cfg(feature = "peer-ip")]
+use std::net::SocketAddr;
+use tower_layer::Layer;
+use tower_service::Service;
 use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
@@ -379,13 +383,23 @@ impl RequestMetadata {
                 .extensions()
                 .get::<OperationId>()
                 .map(|operation| operation.as_str().to_owned()),
-            remote_ip: request
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|connect| connect.0.ip().to_string()),
+            remote_ip: peer_ip(request),
             user_agent: exactly_one_header(request.headers(), &USER_AGENT),
         }
     }
+}
+
+#[cfg(feature = "peer-ip")]
+fn peer_ip(request: &Request<Body>) -> Option<String> {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect| connect.0.ip().to_string())
+}
+
+#[cfg(not(feature = "peer-ip"))]
+fn peer_ip(_request: &Request<Body>) -> Option<String> {
+    None
 }
 
 fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {

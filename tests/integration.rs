@@ -1,11 +1,10 @@
-#![allow(missing_docs)]
+//! End-to-end middleware and formatter contract tests.
 
 use std::{
     collections::BTreeMap,
     convert::Infallible,
     future::{Ready, ready},
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -15,10 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "peer-ip")]
+use axum::extract::ConnectInfo;
 use axum::{
     Extension, Router,
-    body::{Body, Bytes},
-    extract::ConnectInfo,
+    body::{Body, Bytes, to_bytes},
     http::{HeaderValue, Request, Response, StatusCode},
     response::IntoResponse,
     routing::get,
@@ -27,12 +27,16 @@ use axum_observability::{
     ObservabilityConfig, ObservabilityLayer, OperationId, Preset, RequestContext,
 };
 use http_body::{Body as HttpBody, Frame};
-use http_body_util::BodyExt;
 use serde_json::Value;
+#[cfg(feature = "peer-ip")]
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower::{Layer, Service, ServiceExt};
 use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer};
 use tracing_subscriber::{
-    Layer as SubscriberLayer, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt,
+    Layer as SubscriberLayer,
+    filter::{LevelFilter, Targets},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
 };
 
 #[derive(Clone, Default)]
@@ -154,12 +158,7 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
     assert_eq!(response.headers()["x-request-id"], "safe_ID~1");
     assert!(capture.records().is_empty(), "body has not completed yet");
 
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "safe_ID~1|safe_ID~1");
     let records = capture.records();
     assert_eq!(records.len(), 1);
@@ -255,7 +254,7 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         .expect("request");
 
     let response = app.oneshot(request).await.expect("response");
-    response.into_body().collect().await.expect("body");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
     let records = capture.records();
     assert_eq!(records.len(), 2);
     for record in &records {
@@ -299,12 +298,7 @@ async fn duplicate_traceparent_is_untrusted_and_falls_back_to_request_id() {
             .append("traceparent", HeaderValue::from_str(value).expect("header"));
     }
     let response = app.oneshot(request).await.expect("response");
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "request-only|request-only");
 }
 
@@ -333,7 +327,7 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
         .await
         .expect("response");
     assert!(capture.records().is_empty());
-    response.into_body().collect().await.expect("body");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
@@ -446,8 +440,7 @@ async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
     assert!(capture.records().is_empty());
 
     let mut body = response.into_body();
-    let frame = body
-        .frame()
+    let frame = std::future::poll_fn(|context| Pin::new(&mut body).poll_frame(context))
         .await
         .expect("final frame")
         .expect("successful final frame");
@@ -475,7 +468,7 @@ async fn body_error_emits_once_with_controlled_error_information() {
         .oneshot(Request::new(Body::empty()))
         .await
         .expect("response");
-    assert!(response.into_body().collect().await.is_err());
+    assert!(to_bytes(response.into_body(), 1_024).await.is_err());
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
@@ -511,13 +504,8 @@ async fn cloud_presets_emit_exact_provider_trace_shapes() {
             )
             .body(Body::empty())
             .expect("request");
-        app.oneshot(request)
-            .await
-            .expect("response")
-            .into_body()
-            .collect()
-            .await
-            .expect("body");
+        let response = app.oneshot(request).await.expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
         let records = capture.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0][key], expected);
@@ -561,7 +549,7 @@ async fn filtered_request_span_does_not_remove_access_record_correlation() {
     let capture = Capture::default();
     let filtered = config
         .json_layer(capture.clone())
-        .with_filter(EnvFilter::new("warn"));
+        .with_filter(Targets::new().with_default(LevelFilter::WARN));
     let _guard = tracing_subscriber::registry().with(filtered).set_default();
     let app = Router::new()
         .route("/", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
@@ -597,9 +585,11 @@ async fn filtered_request_span_does_not_remove_access_record_correlation() {
 async fn request_span_directive_preserves_correlation_and_rejects_late_spoofing() {
     let config = ObservabilityConfig::default().with_preset(Preset::Gcp);
     let capture = Capture::default();
-    let filtered = config
-        .json_layer(capture.clone())
-        .with_filter(EnvFilter::new("warn,axum_observability::request=info"));
+    let filtered = config.json_layer(capture.clone()).with_filter(
+        Targets::new()
+            .with_default(LevelFilter::WARN)
+            .with_target("axum_observability::request", LevelFilter::INFO),
+    );
     let _guard = tracing_subscriber::registry().with(filtered).set_default();
     let app = Router::new()
         .route(
@@ -668,6 +658,7 @@ async fn synchronous_inner_service_events_are_inside_the_request_span() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "peer-ip")]
 async fn peer_and_unambiguous_user_agent_are_recorded_without_forwarded_headers() {
     let config = ObservabilityConfig::default();
     let capture = Capture::default();
@@ -685,13 +676,8 @@ async fn peer_and_unambiguous_user_agent_are_recorded_without_forwarded_headers(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         3210,
     )));
-    app.oneshot(request)
-        .await
-        .expect("response")
-        .into_body()
-        .collect()
-        .await
-        .expect("body");
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
     let records = capture.records();
     assert_eq!(records[0]["remote_ip"], "127.0.0.1");
     assert_eq!(records[0]["user_agent"], "agent/1");
@@ -738,7 +724,7 @@ async fn outer_observability_records_recovered_panics_and_timeouts_with_final_st
             .await
             .expect("recovered response");
         assert_eq!(response.status(), expected);
-        response.into_body().collect().await.expect("body");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
     }
 
     let access = capture
@@ -806,12 +792,7 @@ async fn custom_header_validator_and_response_header_configuration_are_effective
         .expect("response");
     assert_eq!(response.headers()["x-correlation-id"], "custom-generated");
     assert!(response.headers().get("x-request-id").is_none());
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "custom-generated|custom-generated");
 
     let disabled = ObservabilityConfig::default().with_response_header(false);
@@ -865,13 +846,8 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
     request
         .extensions_mut()
         .insert(OperationId::new("list-items"));
-    app.oneshot(request)
-        .await
-        .expect("response")
-        .into_body()
-        .collect()
-        .await
-        .expect("body");
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
 
     let records = capture.records();
     let record = &records[0];
