@@ -118,6 +118,67 @@ impl HttpBody for FinalFrameBody {
     }
 }
 
+struct PendingOnceBody {
+    data: Option<Bytes>,
+    pending: bool,
+}
+
+impl HttpBody for PendingOnceBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if !self.pending {
+            self.pending = true;
+            context.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        Poll::Ready(self.data.take().map(|bytes| Ok(Frame::data(bytes))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_body_poll_preserves_data_and_defers_terminal_emission() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                Response::new(Body::new(PendingOnceBody {
+                    data: Some(Bytes::from_static(b"after-pending")),
+                    pending: false,
+                }))
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    assert!(capture.records().is_empty());
+
+    let mut body = response.into_body();
+    let mut context = Context::from_waker(std::task::Waker::noop());
+    assert!(Pin::new(&mut body).poll_frame(&mut context).is_pending());
+    assert!(capture.records().is_empty());
+
+    let body = to_bytes(body, 1_024).await.expect("body");
+
+    assert_eq!(body, "after-pending");
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].get("terminal_reason").is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
     let config = ObservabilityConfig::default();
@@ -221,13 +282,14 @@ async fn completed_statuses_use_the_configured_mapper_once() {
     let app = Router::new()
         .route("/ok", get(|| async { StatusCode::OK }))
         .route("/bad", get(|| async { StatusCode::BAD_REQUEST }))
+        .route("/trace", get(|| async { StatusCode::NO_CONTENT }))
         .route(
             "/error",
             get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
         )
         .layer(ObservabilityLayer::new(config));
 
-    for path in ["/ok", "/bad", "/error"] {
+    for path in ["/ok", "/bad", "/error", "/trace"] {
         let response = app
             .clone()
             .oneshot(
@@ -242,10 +304,11 @@ async fn completed_statuses_use_the_configured_mapper_once() {
     }
 
     let records = capture.records();
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 4);
     assert_eq!(records[0]["level"], "DEBUG");
     assert_eq!(records[1]["level"], "WARN");
     assert_eq!(records[2]["level"], "ERROR");
+    assert_eq!(records[3]["level"], "TRACE");
     assert!(
         records
             .iter()

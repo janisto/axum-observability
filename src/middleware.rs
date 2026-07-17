@@ -62,12 +62,15 @@ pub struct ObservabilityConfig {
 
 impl fmt::Debug for ObservabilityConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ObservabilityConfig")
+        let mut debug = formatter.debug_struct("ObservabilityConfig");
+        debug
             .field("field_convention", &self.field_convention)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
-            .field("raw_path", &self.raw_path)
+            .field("raw_path", &self.raw_path);
+        #[cfg(feature = "peer-ip")]
+        debug.field("peer_ip", &self.peer_ip);
+        debug
             .field("user_agent", &self.user_agent)
             .finish_non_exhaustive()
     }

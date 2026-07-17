@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn formatter_debug_reports_policy_without_requiring_or_exposing_the_writer() {
+    let layer = ObservabilityConfig::default()
+        .with_field_convention(FieldConvention::Azure)
+        .json_layer(Capture::default())
+        .log_internal_errors(false);
+
+    let debug = format!("{layer:?}");
+    assert!(debug.contains("JsonLayer"));
+    assert!(debug.contains("field_convention: Azure"));
+    assert!(debug.contains("log_internal_errors: false"));
+    assert!(!debug.contains("writer"));
+}
+
+#[test]
+fn unrelated_spans_cannot_spoof_request_correlation_fields() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let span = tracing::info_span!(
+        target: "application",
+        "application span",
+        request_id = "span-spoofed",
+        correlation_id = "correlation-spoofed"
+    );
+    let _entered = span.enter();
+
+    tracing::info!(answer = 42_u64, "application event");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["answer"], 42);
+    assert!(records[0].get("request_id").is_none());
+    assert!(records[0].get("correlation_id").is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn formatter_preserves_typed_application_fields_and_background_events() {
     let config = ObservabilityConfig::default();

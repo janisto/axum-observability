@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn configuration_debug_reports_safe_policies_without_callback_internals() {
+    let generator_secret = "generator-secret-must-not-leak".to_owned();
+    let config = ObservabilityConfig::default()
+        .with_field_convention(FieldConvention::Aws)
+        .with_request_id_header(HeaderName::from_static("x-correlation-id"))
+        .with_response_header(false)
+        .with_raw_path(true)
+        .with_user_agent(true)
+        .with_request_id_generator(move || {
+            let _ = &generator_secret;
+            None
+        });
+    #[cfg(feature = "peer-ip")]
+    let config = config.with_peer_ip(true);
+
+    let debug = format!("{config:?}");
+    for expected in [
+        "ObservabilityConfig",
+        "field_convention: Aws",
+        "request_id_header: \"x-correlation-id\"",
+        "response_header: false",
+        "raw_path: true",
+        "user_agent: true",
+    ] {
+        assert!(
+            debug.contains(expected),
+            "missing {expected:?} from {debug:?}"
+        );
+    }
+    #[cfg(feature = "peer-ip")]
+    assert!(debug.contains("peer_ip: true"));
+    for callback in [
+        "generator",
+        "validator",
+        "level_mapper",
+        "clock",
+        "enricher",
+    ] {
+        assert!(
+            !debug.contains(callback),
+            "leaked {callback:?} in {debug:?}"
+        );
+    }
+    assert!(!debug.contains("generator-secret-must-not-leak"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn custom_header_validator_and_response_header_configuration_are_effective() {
     let config = ObservabilityConfig::default()
