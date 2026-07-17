@@ -130,6 +130,10 @@ fn is_valid_tracestate_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use proptest::prelude::*;
+
     use super::{parse_traceparent, parse_tracestate};
 
     const VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -232,6 +236,7 @@ mod tests {
     fn rejects_duplicate_invalid_and_over_limit_tracestate() {
         assert!(parse_tracestate(std::iter::empty()).is_none());
         assert!(parse_tracestate(["a=1,a=2"]).is_none());
+        assert!(parse_tracestate(["a=1", "a=2"]).is_none());
         assert!(parse_tracestate(["Upper=1"]).is_none());
         assert!(parse_tracestate(["a=control\u{7f}"]).is_none());
         assert!(parse_tracestate(["a=contains=value"]).is_none());
@@ -311,6 +316,69 @@ mod tests {
             assert!(
                 parse_tracestate([invalid.as_str()]).is_none(),
                 "accepted {invalid:?}"
+            );
+        }
+    }
+
+    fn encode_lower_hex(bytes: &[u8]) -> String {
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(encoded, "{byte:02x}").expect("writing to a string is infallible");
+        }
+        encoded
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn round_trips_generated_valid_traceparents(
+            trace_id in any::<[u8; 16]>()
+                .prop_filter("trace ID must be nonzero", |value| value.iter().any(|byte| *byte != 0)),
+            parent_id in any::<[u8; 8]>()
+                .prop_filter("parent ID must be nonzero", |value| value.iter().any(|byte| *byte != 0)),
+            flags in any::<u8>(),
+        ) {
+            let trace_id = encode_lower_hex(&trace_id);
+            let parent_id = encode_lower_hex(&parent_id);
+            let value = format!("00-{trace_id}-{parent_id}-{flags:02x}");
+
+            let parsed = parse_traceparent(&value).expect("generated traceparent is valid");
+            prop_assert_eq!(parsed.trace_id(), trace_id.as_str());
+            prop_assert_eq!(parsed.parent_id(), parent_id.as_str());
+            prop_assert_eq!(parsed.flags(), flags);
+            prop_assert_eq!(parsed.sampled(), flags & 1 == 1);
+            prop_assert_eq!(parsed.traceparent(), value.as_str());
+        }
+
+        #[test]
+        fn preserves_generated_tracestate_across_header_splits(
+            values in proptest::collection::vec("[A-Za-z0-9._~/-]{1,8}", 1..=32),
+            split_mask in any::<u32>(),
+        ) {
+            let members = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("k{index}={value}"))
+                .collect::<Vec<_>>();
+            let combined = members.join(",");
+            let mut fields = Vec::new();
+            let mut field = String::new();
+
+            for (index, member) in members.iter().enumerate() {
+                if !field.is_empty() {
+                    field.push(',');
+                }
+                field.push_str(member);
+                if index + 1 < members.len() && split_mask & (1 << index) != 0 {
+                    fields.push(std::mem::take(&mut field));
+                }
+            }
+            fields.push(field);
+
+            prop_assert_eq!(
+                parse_tracestate(fields.iter().map(String::as_str)),
+                Some(combined),
             );
         }
     }

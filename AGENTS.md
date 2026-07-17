@@ -67,9 +67,9 @@
   for coverage numbers or mock interactions alone.
 - Run `just mutation` when changing production logic or its focused tests. Add
   tests for meaningful surviving mutants, not equivalent transformations.
-- Keep mutation testing separate from `just fuzz`, which mutates parser inputs
-  rather than production code and requires a Rust nightly toolchain.
-- Never commit generated coverage, mutation, fuzz, or package artifacts.
+- Promote minimized property-test failures to named deterministic regression
+  tests before fixing the production behavior.
+- Never commit generated coverage, mutation, or package artifacts.
 
 ## Releases
 

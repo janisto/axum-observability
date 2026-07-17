@@ -5,11 +5,12 @@ set shell := ["bash", "-ceu"]
 
 [group('lifecycle')]
 install:
-    cargo install --locked cargo-deny --version 0.20.2
-    cargo install --locked cargo-audit --version 0.22.2
-    cargo install --locked cargo-mutants --version 27.1.0
-    cargo install --locked cargo-fuzz --version 0.13.2
-    cargo install --locked cargo-llvm-cov --version 0.8.7
+    cargo fetch --locked
+    cargo install --locked cargo-deny cargo-audit cargo-mutants cargo-llvm-cov
+
+[group('lifecycle')]
+update:
+    cargo update
 
 [group('qa')]
 fmt:
@@ -60,9 +61,3 @@ qa: fmt-check lint test test-doc deny audit
 [group('adversarial')]
 mutation *args:
     cargo mutants {{ args }}
-
-[group('adversarial')]
-fuzz target="request_id" duration="30":
-    nightly_cargo="$(rustup which --toolchain nightly cargo)"; \
-    nightly_bin="$(dirname "$nightly_cargo")"; \
-    PATH="$nightly_bin:$PATH" "$nightly_cargo" fuzz run {{ target }} -- -max_total_time={{ duration }}

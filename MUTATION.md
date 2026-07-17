@@ -18,5 +18,5 @@ Three mutations are excluded narrowly in `.cargo/mutants.toml`:
 Do not broaden these exclusions. New surviving mutants require either a
 behavioral test or a written equivalence/tool-limitation explanation here.
 
-The final full baseline tested 228 non-excluded mutants: 191 were caught, 37
+The current full baseline tested 239 non-excluded mutants: 203 were caught, 36
 were unviable, and none were missed.

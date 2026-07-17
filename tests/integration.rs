@@ -528,22 +528,31 @@ async fn cloud_presets_emit_exact_provider_trace_shapes() {
 }
 
 #[test]
-fn malformed_request_span_trace_id_does_not_panic_or_emit_aws_metadata() {
+fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
     let config = ObservabilityConfig::default().with_preset(Preset::Aws);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
-    let span = tracing::info_span!(
-        target: "axum_observability::request",
-        "request",
-        trace_id = "short",
-    );
-
-    span.in_scope(|| tracing::info!("application event"));
+    let invalid = [
+        "short".to_owned(),
+        "abc".to_owned(),
+        "g".repeat(32),
+        "0".repeat(32),
+    ];
+    for trace_id in &invalid {
+        let span = tracing::info_span!(
+            target: "axum_observability::request",
+            "request",
+            trace_id = trace_id.as_str(),
+        );
+        span.in_scope(|| tracing::info!("application event"));
+    }
 
     let records = capture.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["trace_id"], "short");
-    assert!(records[0].get("xray_trace_id").is_none());
+    assert_eq!(records.len(), invalid.len());
+    for (record, trace_id) in records.iter().zip(invalid) {
+        assert_eq!(record["trace_id"], trace_id);
+        assert!(record.get("xray_trace_id").is_none());
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

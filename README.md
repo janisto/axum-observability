@@ -336,23 +336,20 @@ crate archive, verifies its allowlisted contents and size, compiles the packaged
 crate, and runs an isolated consumer against it. Maintainers should follow the
 public [release architecture and guide](RELEASE.md).
 
-## Mutation and fuzz testing
+## Property and mutation testing
 
-The crate has explicit mutation and parser-fuzzing campaigns:
+Stable property tests generate valid W3C trace context and exercise equivalent
+multi-header `tracestate` layouts as part of the normal test suite. Mutation
+testing remains an explicit maintainer campaign:
 
 ```bash
 just mutation
-just fuzz traceparent 30
 ```
 
 Mutation testing runs outside `just qa`; see [MUTATION.md](MUTATION.md) for the
 reviewed baseline and narrow exclusions. Add a behavioral test when a surviving
 mutant exposes a real contract gap. Equivalent transformations do not need
 artificial assertions.
-
-Fuzz targets cover request IDs, `traceparent`, and `tracestate`. Fuzzing requires
-a Rust nightly toolchain for libFuzzer sanitizer instrumentation; the crate's
-build and MSRV remain on stable Rust.
 
 ## References
 

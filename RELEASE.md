@@ -160,8 +160,8 @@ shasum -a 256 "target/package/axum-observability-$VERSION.crate"
 
 The archive must contain only the reviewed library source, examples, package
 metadata, README, changelog, example guide, and license. It must not contain
-tests, plans, credentials, local output, maintainer-only guides, fuzz corpora,
-coverage reports, or mutation artifacts.
+tests, plans, credentials, local output, maintainer-only guides, coverage
+reports, or mutation artifacts.
 
 Merge the release preparation through a green pull request to `main`.
 
