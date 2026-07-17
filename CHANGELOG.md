@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Canonicalized the configured request-ID header before downstream handling,
+  used one validated `RequestId` across context, spans, logs, and responses,
+  and accepted opaque W3C future-version `traceparent` extensions.
 - Classified terminal body and service failures at `ERROR`, preserved mapped
   levels for completed and abandoned responses, and contained initial clock
   panics without replacing request handling.

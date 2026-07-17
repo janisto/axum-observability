@@ -18,8 +18,7 @@ mod trace_context;
 pub use context::{OperationId, RequestContext, TraceContext};
 pub use formatter::JsonLayer;
 pub use middleware::{ObservabilityConfig, ObservabilityLayer};
-pub use request_id::is_valid_request_id;
-pub use trace_context::{parse_traceparent, parse_tracestate};
+pub use request_id::{InvalidRequestId, RequestId};
 
 /// Structured logging field convention.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -141,7 +141,9 @@ as 32 lowercase hexadecimal characters.
 
 The selected value is available from:
 
-- the `RequestContext` extractor and request extension;
+- the validated `RequestId` in the `RequestContext` extractor and request
+  extension;
+- exactly one canonical configured header before downstream service code runs;
 - `request_id()` and `correlation_id()`;
 - application events inside an enabled package request span;
 - the terminal access record; and
@@ -149,13 +151,15 @@ The selected value is available from:
 
 Configuration can change the request/response header name, disable the response
 header, narrow validation, or supply a fallible generator. Generated values
-still pass the package baseline. A generator is tried at most twice before the
-package-owned fallback is used, and callback failure never produces an invalid
-ID.
+use `RequestId`, making baseline validity explicit. A generator is invoked once
+per replacement request before the package-owned fallback is used, and callback
+failure never produces an invalid ID.
 
 `traceparent` parsing rejects duplicates, uppercase hexadecimal, zero trace or
 parent IDs, invalid framing and flags, and oversized input. Version `00` must
-use its exact framing; well-formed future-version extensions are retained.
+use its exact framing. Versions `01` through `fe` validate the known prefix and
+treat a delimiter plus any remaining extension bytes as opaque, including a
+trailing delimiter.
 Repeated `tracestate` values are combined in wire order and accepted only when
 their grammar, unique-key rule, 32-member limit, and 512-byte limit pass. An
 invalid `tracestate` is discarded without invalidating a valid `traceparent`.
@@ -279,7 +283,7 @@ remain responsible for choosing and monitoring the output destination.
 | `with_preset` | `Preset::Default` | Select one provider field convention |
 | `with_request_id_header` | `x-request-id` | Set the request and response correlation header |
 | `with_response_header` | `true` | Enable or disable response-header injection |
-| `with_request_id_generator` | random 128-bit ID | Supply a fallible generator, tried at most twice |
+| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked once per replacement |
 | `with_request_id_validator` | accepts baseline | Narrow accepted IDs without weakening the baseline |
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |

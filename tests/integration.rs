@@ -19,12 +19,12 @@ use axum::extract::ConnectInfo;
 use axum::{
     Extension, Router,
     body::{Body, Bytes, to_bytes},
-    http::{HeaderValue, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, Response, StatusCode},
     response::IntoResponse,
     routing::get,
 };
 use axum_observability::{
-    ObservabilityConfig, ObservabilityLayer, OperationId, Preset, RequestContext,
+    ObservabilityConfig, ObservabilityLayer, OperationId, Preset, RequestContext, RequestId,
 };
 use http_body::{Body as HttpBody, Frame};
 use serde_json::Value;
@@ -118,6 +118,29 @@ async fn context_handler(context: RequestContext) -> String {
     format!("{}|{}", context.request_id(), context.correlation_id())
 }
 
+async fn canonical_identity_handler(context: RequestContext, headers: HeaderMap) -> String {
+    let values = headers
+        .get_all("x-request-id")
+        .iter()
+        .map(|value| value.to_str().expect("canonical ID is text"))
+        .collect::<Vec<_>>();
+    format!("{}|{}|{}", context.request_id(), values.len(), values[0])
+}
+
+async fn canonical_logging_handler(context: RequestContext, headers: HeaderMap) -> String {
+    tracing::info!("identity observed");
+    canonical_identity_handler(context, headers).await
+}
+
+async fn custom_identity_handler(context: RequestContext, headers: HeaderMap) -> String {
+    format!(
+        "{}|{}|{}",
+        context.request_id(),
+        headers.get_all("x-correlation-id").iter().count(),
+        headers.get("x-request-id").is_none()
+    )
+}
+
 #[derive(Clone)]
 struct SynchronousLoggingService;
 
@@ -142,7 +165,7 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
-        .route("/context", get(context_handler))
+        .route("/context", get(canonical_identity_handler))
         .layer(ObservabilityLayer::new(config));
 
     let response = app
@@ -159,7 +182,7 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
     assert!(capture.records().is_empty(), "body has not completed yet");
 
     let body = to_bytes(response.into_body(), 1_024).await.expect("body");
-    assert_eq!(body, "safe_ID~1|safe_ID~1");
+    assert_eq!(body, "safe_ID~1|1|safe_ID~1");
     let records = capture.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["path"], "/context");
@@ -168,19 +191,98 @@ async fn accepts_one_valid_request_id_and_returns_it_on_the_response() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn replaces_duplicate_ids_and_retries_a_bad_custom_generator_once() {
+async fn canonical_request_id_is_shared_by_context_header_span_response_and_terminal_record() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(canonical_logging_handler))
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("x-request-id", "same-everywhere")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.headers()["x-request-id"], "same-everywhere");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "same-everywhere|1|same-everywhere");
+
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["request_id"], "same-everywhere");
+        assert_eq!(record["correlation_id"], "same-everywhere");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_invalid_duplicate_and_comma_joined_ids_are_canonicalized_before_service() {
+    let config = ObservabilityConfig::default().with_request_id_generator(|| {
+        Some(RequestId::parse("generated-canonical").expect("valid generated ID"))
+    });
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(canonical_identity_handler))
+        .layer(ObservabilityLayer::new(config));
+
+    let mut requests = vec![
+        Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .expect("missing request ID"),
+        Request::builder()
+            .uri("/")
+            .header("x-request-id", "rejected/secret")
+            .body(Body::empty())
+            .expect("invalid request ID"),
+        Request::builder()
+            .uri("/")
+            .header("x-request-id", "first,second")
+            .body(Body::empty())
+            .expect("joined request ID"),
+    ];
+    let mut duplicate = Request::builder()
+        .uri("/")
+        .header("x-request-id", "first-secret")
+        .body(Body::empty())
+        .expect("duplicate request ID");
+    duplicate
+        .headers_mut()
+        .append("x-request-id", HeaderValue::from_static("second-secret"));
+    requests.push(duplicate);
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.headers()["x-request-id"], "generated-canonical");
+        let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+        assert_eq!(body, "generated-canonical|1|generated-canonical");
+    }
+
+    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    for rejected in [
+        "rejected/secret",
+        "first,second",
+        "first-secret",
+        "second-secret",
+    ] {
+        assert!(!output.contains(rejected), "leaked {rejected:?}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replaces_duplicate_ids_and_invokes_the_generator_once() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default().with_request_id_generator(move || {
-        let attempt = generator_attempts.fetch_add(1, Ordering::SeqCst);
-        Some(
-            if attempt == 0 {
-                "not valid"
-            } else {
-                "retry-ok"
-            }
-            .to_owned(),
-        )
+        generator_attempts.fetch_add(1, Ordering::SeqCst);
+        Some(RequestId::parse("generated-once").expect("valid generated ID"))
     });
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
@@ -199,14 +301,19 @@ async fn replaces_duplicate_ids_and_retries_a_bad_custom_generator_once() {
         .append("x-request-id", HeaderValue::from_static("second"));
 
     let response = app.oneshot(request).await.expect("response");
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(response.headers()["x-request-id"], "retry-ok");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(response.headers()["x-request-id"], "generated-once");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default()
-        .with_request_id_generator(|| panic!("generator failure"))
+        .with_request_id_generator(move || {
+            generator_attempts.fetch_add(1, Ordering::SeqCst);
+            panic!("generator failure");
+        })
         .with_request_id_validator(|_| false);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
@@ -226,6 +333,48 @@ async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything
         id.bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generator_none_and_validator_rejection_use_package_owned_ids() {
+    let none_config = ObservabilityConfig::default().with_request_id_generator(|| None);
+    let none_app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(none_config));
+    let none_response = none_app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    let none_id = none_response.headers()["x-request-id"]
+        .to_str()
+        .expect("request ID text");
+    assert_eq!(
+        RequestId::parse(none_id).expect("valid fallback").as_str(),
+        none_id
+    );
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let generator_attempts = attempts.clone();
+    let rejected_config = ObservabilityConfig::default()
+        .with_request_id_generator(move || {
+            generator_attempts.fetch_add(1, Ordering::SeqCst);
+            Some(RequestId::parse("validator-rejected").expect("valid generated ID"))
+        })
+        .with_request_id_validator(|_| false);
+    let rejected_app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(rejected_config));
+    let rejected_response = rejected_app
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect("response");
+    let rejected_id = rejected_response.headers()["x-request-id"]
+        .to_str()
+        .expect("request ID text");
+    assert_ne!(rejected_id, "validator-rejected");
+    assert!(RequestId::parse(rejected_id).is_ok());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -274,6 +423,31 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
     assert_eq!(records[1]["httpRequest"]["requestMethod"], "GET");
     assert_eq!(records[1]["httpRequest"]["requestUrl"], "/items/42");
     assert!(records[1]["httpRequest"]["status"].is_u64());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn future_traceparent_extension_is_accepted_but_never_logged() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "future-request")
+        .header(
+            "traceparent",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-opaque-secret",
+        )
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "future-request|4bf92f3577b34da6a3ce929d0e0e4736");
+    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    assert!(!output.contains("opaque-secret"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -941,8 +1115,10 @@ async fn custom_header_validator_and_response_header_configuration_are_effective
     let config = ObservabilityConfig::default()
         .with_request_id_header("x-correlation-id")
         .expect("valid custom header")
-        .with_request_id_validator(|value| value.starts_with("custom-"))
-        .with_request_id_generator(|| Some("custom-generated".to_owned()));
+        .with_request_id_validator(|value| value.as_str().starts_with("custom-"))
+        .with_request_id_generator(|| {
+            Some(RequestId::parse("custom-generated").expect("valid generated ID"))
+        });
     assert!(
         ObservabilityConfig::default()
             .with_request_id_header("not a header")
@@ -951,7 +1127,7 @@ async fn custom_header_validator_and_response_header_configuration_are_effective
     let capture = Capture::default();
     let _guard = subscriber(&config, capture).set_default();
     let app = Router::new()
-        .route("/", get(context_handler))
+        .route("/", get(custom_identity_handler))
         .layer(ObservabilityLayer::new(config));
     let response = app
         .oneshot(
@@ -966,19 +1142,27 @@ async fn custom_header_validator_and_response_header_configuration_are_effective
     assert_eq!(response.headers()["x-correlation-id"], "custom-generated");
     assert!(response.headers().get("x-request-id").is_none());
     let body = to_bytes(response.into_body(), 1_024).await.expect("body");
-    assert_eq!(body, "custom-generated|custom-generated");
+    assert_eq!(body, "custom-generated|1|true");
 
     let disabled = ObservabilityConfig::default().with_response_header(false);
     let capture = Capture::default();
     let _guard = subscriber(&disabled, capture).set_default();
     let app = Router::new()
-        .route("/", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/", get(canonical_identity_handler))
         .layer(ObservabilityLayer::new(disabled));
     let response = app
         .oneshot(Request::new(Body::empty()))
         .await
         .expect("response");
     assert!(response.headers().get("x-request-id").is_none());
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    let body = String::from_utf8(body.to_vec()).expect("context body");
+    let fields = body.split('|').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3);
+    let request_id = fields[0];
+    assert_eq!(fields[1], "1");
+    assert_eq!(fields[2], request_id);
+    assert!(RequestId::parse(request_id).is_ok());
 }
 
 #[tokio::test(flavor = "current_thread")]

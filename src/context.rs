@@ -1,3 +1,5 @@
+use crate::RequestId;
+
 /// Validated inbound W3C trace context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceContext {
@@ -64,7 +66,7 @@ impl TraceContext {
 /// Correlation metadata installed in every observed request's extensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestContext {
-    request_id: String,
+    request_id: RequestId,
     correlation_id: String,
     trace_context: Option<TraceContext>,
 }
@@ -88,10 +90,11 @@ where
 }
 
 impl RequestContext {
-    pub(crate) fn new(request_id: String, trace_context: Option<TraceContext>) -> Self {
-        let correlation_id = trace_context
-            .as_ref()
-            .map_or_else(|| request_id.clone(), |trace| trace.trace_id.clone());
+    pub(crate) fn new(request_id: RequestId, trace_context: Option<TraceContext>) -> Self {
+        let correlation_id = trace_context.as_ref().map_or_else(
+            || request_id.as_str().to_owned(),
+            |trace| trace.trace_id.clone(),
+        );
         Self {
             request_id,
             correlation_id,
@@ -101,7 +104,7 @@ impl RequestContext {
 
     /// Validated or generated request identifier.
     #[must_use]
-    pub fn request_id(&self) -> &str {
+    pub const fn request_id(&self) -> &RequestId {
         &self.request_id
     }
 

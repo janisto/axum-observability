@@ -28,12 +28,12 @@ use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::{
-    JsonLayer, OperationId, Preset, RequestContext, TraceContext, is_valid_request_id,
-    parse_traceparent, parse_tracestate,
+    JsonLayer, OperationId, Preset, RequestContext, RequestId, TraceContext,
+    trace_context::{parse_traceparent, parse_tracestate},
 };
 
-type Generator = Arc<dyn Fn() -> Option<String> + Send + Sync>;
-type Validator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+type Generator = Arc<dyn Fn() -> Option<RequestId> + Send + Sync>;
+type Validator = Arc<dyn Fn(&RequestId) -> bool + Send + Sync>;
 type LevelMapper = Arc<dyn Fn(StatusCode) -> Level + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + Sync>;
@@ -68,7 +68,7 @@ impl Default for ObservabilityConfig {
             preset: Preset::Default,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
-            generator: Arc::new(|| Some(Uuid::new_v4().simple().to_string())),
+            generator: Arc::new(|| Some(random_request_id())),
             validator: Arc::new(|_| true),
             level_mapper: Arc::new(default_level),
             clock: Arc::new(Instant::now),
@@ -105,12 +105,12 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Sets a fallible request ID generator. It is tried at most twice before
-    /// the crate falls back to a package-owned random identifier.
+    /// Sets a fallible request ID generator. It is invoked once per replacement
+    /// request before the crate falls back to a package-owned random identifier.
     #[must_use]
     pub fn with_request_id_generator(
         mut self,
-        generator: impl Fn() -> Option<String> + Send + Sync + 'static,
+        generator: impl Fn() -> Option<RequestId> + Send + Sync + 'static,
     ) -> Self {
         self.generator = Arc::new(generator);
         self
@@ -121,7 +121,7 @@ impl ObservabilityConfig {
     #[must_use]
     pub fn with_request_id_validator(
         mut self,
-        validator: impl Fn(&str) -> bool + Send + Sync + 'static,
+        validator: impl Fn(&RequestId) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.validator = Arc::new(validator);
         self
@@ -165,22 +165,19 @@ impl ObservabilityConfig {
         JsonLayer::new(writer, self.preset)
     }
 
-    fn accepts_request_id(&self, value: &str) -> bool {
-        is_valid_request_id(value)
-            && catch_unwind(AssertUnwindSafe(|| (self.validator)(value))).unwrap_or(false)
+    fn accepts_request_id(&self, value: &RequestId) -> bool {
+        catch_unwind(AssertUnwindSafe(|| (self.validator)(value))).unwrap_or(false)
     }
 
-    fn generate_request_id(&self) -> String {
-        for _ in 0..2 {
-            let generated = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
-                .ok()
-                .flatten();
-            if let Some(value) = generated.filter(|value| self.accepts_request_id(value)) {
-                return value;
-            }
+    fn generate_request_id(&self) -> RequestId {
+        let generated = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
+            .ok()
+            .flatten();
+        if let Some(value) = generated.filter(|value| self.accepts_request_id(value)) {
+            return value;
         }
 
-        Uuid::new_v4().simple().to_string()
+        random_request_id()
     }
 }
 
@@ -237,7 +234,7 @@ where
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let request_id = select_request_id(request.headers(), &self.config);
+        let request_id = select_request_id(request.headers_mut(), &self.config);
         let trace_context = select_trace_context(request.headers());
         let request_context = RequestContext::new(request_id, trace_context);
         let metadata = RequestMetadata::from_request(&request);
@@ -276,7 +273,7 @@ where
                             guard.set_operation_id(operation_id);
                         }
                         if config.response_header {
-                            let value = HeaderValue::from_str(guard.request_id())
+                            let value = HeaderValue::from_str(guard.request_id().as_str())
                                 .expect("validated request ID is always a header value");
                             parts
                                 .headers
@@ -298,15 +295,28 @@ where
     }
 }
 
-fn select_request_id(headers: &HeaderMap, config: &ObservabilityConfig) -> String {
+fn select_request_id(headers: &mut HeaderMap, config: &ObservabilityConfig) -> RequestId {
     let mut values = headers.get_all(&config.request_id_header).iter();
-    let first = values.next().and_then(|value| value.to_str().ok());
-    if values.next().is_none()
-        && let Some(value) = first.filter(|value| config.accepts_request_id(value))
-    {
-        return value.to_owned();
-    }
-    config.generate_request_id()
+    let first = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| RequestId::parse(value).ok());
+    let request_id = if values.next().is_none() {
+        first
+            .filter(|value| config.accepts_request_id(value))
+            .unwrap_or_else(|| config.generate_request_id())
+    } else {
+        config.generate_request_id()
+    };
+    let header_value = HeaderValue::from_str(request_id.as_str())
+        .expect("validated request ID is always a header value");
+    headers.insert(config.request_id_header.clone(), header_value);
+    request_id
+}
+
+fn random_request_id() -> RequestId {
+    RequestId::parse(&Uuid::new_v4().simple().to_string())
+        .expect("UUID simple formatting satisfies the request-ID contract")
 }
 
 fn select_trace_context(headers: &HeaderMap) -> Option<TraceContext> {
@@ -331,7 +341,7 @@ fn request_span(context: &RequestContext) -> Span {
         tracing::info_span!(
             target: "axum_observability::request",
             "request",
-            request_id = context.request_id(),
+            request_id = %context.request_id(),
             correlation_id = context.correlation_id(),
             trace_id = trace.trace_id(),
             parent_id = trace.parent_id(),
@@ -342,7 +352,7 @@ fn request_span(context: &RequestContext) -> Span {
         tracing::info_span!(
             target: "axum_observability::request",
             "request",
-            request_id = context.request_id(),
+            request_id = %context.request_id(),
             correlation_id = context.correlation_id(),
             trace_id = tracing::field::Empty,
             parent_id = tracing::field::Empty,
@@ -497,7 +507,7 @@ impl TerminalGuard {
         }
     }
 
-    fn request_id(&self) -> &str {
+    fn request_id(&self) -> &RequestId {
         self.state
             .as_ref()
             .expect("terminal guard has not completed")
@@ -527,7 +537,7 @@ impl TerminalGuard {
         let trace = state.request_context.trace_context();
         let (terminal_reason, error) = outcome.record_fields();
         let record = AccessRecord {
-            request_id: state.request_context.request_id().to_owned(),
+            request_id: state.request_context.request_id().as_str().to_owned(),
             correlation_id: state.request_context.correlation_id().to_owned(),
             trace_id: trace.map(|trace| trace.trace_id().to_owned()),
             parent_id: trace.map(|trace| trace.parent_id().to_owned()),

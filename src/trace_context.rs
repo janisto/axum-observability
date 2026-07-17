@@ -4,7 +4,7 @@ use crate::TraceContext;
 
 /// Parses a single W3C `traceparent` value using strict lowercase framing.
 #[must_use]
-pub fn parse_traceparent(value: &str) -> Option<TraceContext> {
+pub(crate) fn parse_traceparent(value: &str) -> Option<TraceContext> {
     let bytes = value.as_bytes();
     if !(55..=512).contains(&bytes.len())
         || bytes[2] != b'-'
@@ -25,11 +25,7 @@ pub fn parse_traceparent(value: &str) -> Option<TraceContext> {
         if bytes.len() != 55 {
             return None;
         }
-    } else if bytes.len() > 55
-        && (bytes[55] != b'-'
-            || bytes.len() == 56
-            || bytes[56..].iter().any(|byte| !byte.is_ascii_graphic()))
-    {
+    } else if bytes.len() > 55 && bytes[55] != b'-' {
         return None;
     }
 
@@ -44,7 +40,7 @@ pub fn parse_traceparent(value: &str) -> Option<TraceContext> {
 
 /// Validates and combines W3C `tracestate` header values in wire order.
 #[must_use]
-pub fn parse_tracestate<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<String> {
+pub(crate) fn parse_tracestate<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let combined = values.into_iter().collect::<Vec<_>>().join(",");
     if combined.is_empty() || combined.len() > 512 {
         return None;
@@ -180,19 +176,24 @@ mod tests {
     }
 
     #[test]
-    fn accepts_future_version_with_well_framed_extension() {
-        assert!(parse_traceparent(&VALID.replacen("00-", "01-", 1)).is_some());
-        let value = VALID.replacen("00-", "01-", 1) + "-vendor";
-        assert!(parse_traceparent(&value).is_some());
+    fn accepts_future_version_with_opaque_extensions() {
+        let future = VALID.replacen("00-", "01-", 1);
+        for value in [
+            future.clone(),
+            format!("{future}-"),
+            format!("{future}-vendor"),
+            format!("{future}-vendor space"),
+            format!("{future}-opaque-ümlaut"),
+        ] {
+            assert!(parse_traceparent(&value).is_some(), "rejected {value:?}");
+        }
     }
 
     #[test]
-    fn rejects_invalid_future_extensions_and_oversized_traceparent() {
+    fn rejects_invalid_future_delimiter_and_oversized_traceparent() {
         let future = VALID.replacen("00-", "01-", 1);
         for invalid in [
-            format!("{future}-"),
             format!("{future}vendor"),
-            format!("{future}-vendor space"),
             format!("{future}-{}", "x".repeat(512)),
         ] {
             assert!(
