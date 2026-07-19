@@ -24,8 +24,8 @@ use axum::{
     routing::get,
 };
 use axum_observability::{
-    FieldConvention, MissingRequestContext, ObservabilityConfig, ObservabilityLayer, OperationId,
-    RequestContext, RequestId,
+    FieldConvention, GcpProfileVersion, MissingRequestContext, ObservabilityConfig,
+    ObservabilityLayer, OperationId, RequestContext, RequestId, TraceContextLevel,
 };
 use http_body::{Body as HttpBody, Frame};
 use serde_json::Value;

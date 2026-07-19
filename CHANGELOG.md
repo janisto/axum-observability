@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Added the specification-defined GCP `0.1.0` profile version, newest-supported
+  resolution for `FieldConvention::Gcp`, exact typed pinning, and effective
+  version introspection without network lookup.
+- Added typed W3C Trace Context Level 1/Level 2 configuration, with Level 1 as
+  the compatibility default and Level 2 random trace-ID flag projection.
+
+### Changed
+
+- Aligned the GCP health example and integration fixture with privacy-safe
+  request metadata, the shared `1.0.0` fixture value, stable `health_check`
+  operation identity, and deterministic DEBUG/INFO output.
+- Aligned correlation output with string `trace_flags`, selected-level
+  `tracestate` grammar including empty members, conditional `trace_id_random`,
+  and integer serialization for exact whole-millisecond durations.
+- Classified `response_dropped` as an abnormal `ERROR` outcome regardless of
+  committed status or the normal-response status mapper.
+- Validate Axum `MatchedPath` parameter and terminal catch-all names before
+  emitting the already-canonical route template; unsafe forms are omitted.
+
 ## [1.0.0] - 2026-07-17
 
 ### Changed

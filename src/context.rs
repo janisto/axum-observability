@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::RequestId;
+use crate::{RequestId, TraceContextLevel};
 
 /// Validated inbound W3C trace context.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,16 +13,24 @@ pub struct TraceContext {
     trace_id: String,
     parent_id: String,
     flags: u8,
+    level: TraceContextLevel,
     traceparent: String,
     tracestate: Option<String>,
 }
 
 impl TraceContext {
-    pub(crate) fn new(trace_id: String, parent_id: String, flags: u8, traceparent: String) -> Self {
+    pub(crate) fn new(
+        trace_id: String,
+        parent_id: String,
+        flags: u8,
+        level: TraceContextLevel,
+        traceparent: String,
+    ) -> Self {
         Self {
             trace_id,
             parent_id,
             flags,
+            level,
             traceparent,
             tracestate: None,
         }
@@ -55,6 +63,24 @@ impl TraceContext {
     #[must_use]
     pub const fn sampled(&self) -> bool {
         self.flags & 1 == 1
+    }
+
+    /// Selected W3C Trace Context level.
+    #[must_use]
+    pub const fn trace_context_level(&self) -> TraceContextLevel {
+        self.level
+    }
+
+    /// Whether the caller marked the trace ID as random in Level 2 mode.
+    ///
+    /// Level 1 does not assign portable meaning to this flag, so it returns
+    /// `None` even when bit one is set.
+    #[must_use]
+    pub const fn trace_id_random(&self) -> Option<bool> {
+        match self.level {
+            TraceContextLevel::Level1 => None,
+            TraceContextLevel::Level2 => Some(self.flags & 2 == 2),
+        }
     }
 
     /// Accepted raw `traceparent` value.

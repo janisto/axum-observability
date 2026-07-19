@@ -31,7 +31,8 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], 418);
     assert_eq!(records[0]["level"], "WARN");
-    assert_eq!(records[0]["duration_ms"], 0.0);
+    assert_eq!(records[0]["duration_ms"], 0);
+    assert!(records[0]["duration_ms"].is_u64());
     assert!(records[0].get("terminal_reason").is_none());
 }
 
@@ -77,7 +78,7 @@ async fn dropping_an_unread_response_emits_one_abnormal_terminal_record() {
     let records = capture.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], 200);
-    assert_eq!(records[0]["level"], "DEBUG");
+    assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
 }
 
@@ -368,7 +369,7 @@ async fn finish_clock_panic_falls_back_to_zero_duration() {
         .await
         .expect("clock panic must not replace the response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(capture.records()[0]["duration_ms"], 0.0);
+    assert_eq!(capture.records()[0]["duration_ms"], 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -484,7 +485,7 @@ async fn dropping_an_unpolled_service_future_still_emits_once() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["level"], "WARN");
+    assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
     assert!(records[0].get("status").is_none());
 }

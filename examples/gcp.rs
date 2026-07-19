@@ -1,12 +1,13 @@
 //! Google Cloud-compatible structured logs from an in-process health route.
 
 use axum::{
-    Router,
+    Extension, Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode},
+    response::IntoResponse,
     routing::get,
 };
-use axum_observability::{FieldConvention, ObservabilityConfig, ObservabilityLayer};
+use axum_observability::{FieldConvention, ObservabilityConfig, ObservabilityLayer, OperationId};
 use tower::ServiceExt as _;
 use tracing_subscriber::{
     Layer as _,
@@ -14,10 +15,10 @@ use tracing_subscriber::{
     prelude::*,
 };
 
-async fn health() -> &'static str {
+async fn health() -> impl IntoResponse {
     tracing::info!(
         service_name = "example-service",
-        service_version = "0.3.0",
+        service_version = "1.0.0",
         health_status = "ok",
         "health check"
     );
@@ -27,14 +28,12 @@ async fn health() -> &'static str {
         check_duration_ms = 3_u64,
         "dependency check"
     );
-    "ok"
+    (Extension(OperationId::from_static("health_check")), "ok")
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let config = ObservabilityConfig::default()
-        .with_field_convention(FieldConvention::Gcp)
-        .with_raw_path(true);
+    let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
     let json = config
         .json_layer(std::io::stdout)
         .with_filter(Targets::new().with_default(LevelFilter::DEBUG));

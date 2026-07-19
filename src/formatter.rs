@@ -308,6 +308,7 @@ fn is_request_field(key: &str) -> bool {
             | "parent_id"
             | "trace_flags"
             | "trace_sampled"
+            | "trace_id_random"
     )
 }
 

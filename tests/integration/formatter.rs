@@ -23,7 +23,8 @@ fn unrelated_spans_cannot_spoof_request_correlation_fields() {
         target: "application",
         "application span",
         request_id = "span-spoofed",
-        correlation_id = "correlation-spoofed"
+        correlation_id = "correlation-spoofed",
+        trace_id_random = true,
     );
     let _entered = span.enter();
 
@@ -34,6 +35,7 @@ fn unrelated_spans_cannot_spoof_request_correlation_fields() {
     assert_eq!(records[0]["answer"], 42);
     assert!(records[0].get("request_id").is_none());
     assert!(records[0].get("correlation_id").is_none());
+    assert!(records[0].get("trace_id_random").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -153,14 +155,14 @@ fn gcp_uses_canonical_cloud_logging_severity_names() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn gcp_health_route_emits_correlated_application_and_terminal_records() {
-    let (status, body, records) = gcp_health_records(LevelFilter::DEBUG).await;
+    let (status, body, records) = health_records(FieldConvention::Gcp, LevelFilter::DEBUG).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "ok");
     assert_eq!(records.len(), 3);
     assert_eq!(records[0]["severity"], "INFO");
     assert_eq!(records[0]["message"], "health check");
     assert_eq!(records[0]["service_name"], "example-service");
-    assert_eq!(records[0]["service_version"], "0.3.0");
+    assert_eq!(records[0]["service_version"], "1.0.0");
     assert_eq!(records[0]["health_status"], "ok");
     assert_eq!(records[1]["severity"], "DEBUG");
     assert_eq!(records[1]["message"], "dependency check");
@@ -176,12 +178,19 @@ async fn gcp_health_route_emits_correlated_application_and_terminal_records() {
     let terminal = &records[2];
     assert_eq!(terminal["severity"], "INFO");
     assert_eq!(terminal["message"], "request completed");
+    assert_eq!(terminal["duration_ms"], 12.5);
     assert_eq!(terminal["path_template"], "/health");
+    assert_eq!(terminal["operation_id"], "health_check");
     assert_eq!(terminal["httpRequest"]["requestMethod"], "GET");
-    assert_eq!(terminal["httpRequest"]["requestUrl"], "/health");
     assert_eq!(terminal["httpRequest"]["status"], 200);
+    assert_eq!(terminal["httpRequest"]["latency"], "0.0125s");
     assert!(terminal["httpRequest"]["status"].is_u64());
-    assert!(terminal["httpRequest"]["latency"].is_string());
+    for private in ["path", "peer_ip", "user_agent"] {
+        assert!(terminal.get(private).is_none());
+    }
+    for private in ["requestUrl", "remoteIp", "userAgent"] {
+        assert!(terminal["httpRequest"].get(private).is_none());
+    }
     for application_only in [
         "service_name",
         "service_version",
@@ -203,7 +212,7 @@ async fn gcp_health_route_emits_correlated_application_and_terminal_records() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn gcp_health_route_respects_info_filter() {
-    let (status, body, records) = gcp_health_records(LevelFilter::INFO).await;
+    let (status, body, records) = health_records(FieldConvention::Gcp, LevelFilter::INFO).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "ok");
     assert_eq!(records.len(), 2);
@@ -217,4 +226,57 @@ async fn gcp_health_route_respects_info_filter() {
     let serialized = serde_json::to_string(&records).expect("records serialize");
     assert!(!serialized.contains("dependency check"));
     assert!(!serialized.contains("check_duration_ms"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn core_health_route_has_exact_portable_projection() {
+    for (filter, messages) in [
+        (
+            LevelFilter::DEBUG,
+            vec!["health check", "dependency check", "request completed"],
+        ),
+        (LevelFilter::INFO, vec!["health check", "request completed"]),
+    ] {
+        let (status, body, records) = health_records(FieldConvention::Generic, filter).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ok");
+        assert_eq!(records.len(), messages.len());
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record["message"].as_str().expect("message"))
+                .collect::<Vec<_>>(),
+            messages
+        );
+        for record in &records {
+            assert_eq!(record["request_id"], "health-example");
+            assert_eq!(record["correlation_id"], "health-example");
+            assert!(record.get("severity").is_none());
+            assert!(record.get("httpRequest").is_none());
+        }
+        assert_eq!(records[0]["level"], "INFO");
+        assert_eq!(records[0]["service_name"], "example-service");
+        assert_eq!(records[0]["service_version"], "1.0.0");
+        assert_eq!(records[0]["health_status"], "ok");
+        let terminal = records.last().expect("terminal record");
+        assert_eq!(terminal["level"], "INFO");
+        assert_eq!(terminal["method"], "GET");
+        assert_eq!(terminal["duration_ms"], 12.5);
+        assert_eq!(terminal["status"], 200);
+        assert_eq!(terminal["path_template"], "/health");
+        assert_eq!(terminal["operation_id"], "health_check");
+        for private in ["path", "peer_ip", "user_agent"] {
+            assert!(terminal.get(private).is_none());
+        }
+        if filter == LevelFilter::DEBUG {
+            assert_eq!(records[1]["level"], "DEBUG");
+            assert_eq!(records[1]["dependency"], "database");
+            assert_eq!(records[1]["dependency_status"], "ok");
+            assert_eq!(records[1]["check_duration_ms"], 3);
+        } else {
+            let serialized = serde_json::to_string(&records).expect("records serialize");
+            assert!(!serialized.contains("dependency check"));
+            assert!(!serialized.contains("check_duration_ms"));
+        }
+    }
 }

@@ -177,9 +177,13 @@ parent IDs, invalid framing and flags, and oversized input. Version `00` must
 use its exact framing. Versions `01` through `fe` validate the known prefix and
 treat a delimiter plus any remaining extension bytes as opaque, including a
 trailing delimiter.
-Repeated `tracestate` values are combined in wire order and accepted only when
-their grammar, unique-key rule, 32-member limit, and 512-byte limit pass. An
-invalid `tracestate` is discarded without invalidating a valid `traceparent`.
+W3C Trace Context Level 1 is the default; select `TraceContextLevel::Level2`
+explicitly when Level 2 key grammar and random trace-ID flag projection are
+required. Repeated `tracestate` values are combined in wire order and accepted
+only when their selected-level grammar, unique-key rule, 32-member limit, and
+512-byte limit pass. Empty members are retained and count toward the member
+limit. An invalid `tracestate` is discarded without invalidating a valid
+`traceparent`.
 
 With valid trace context, `correlation_id` is the trace ID; otherwise it is the
 request ID. The incoming parent ID belongs to the caller. The crate does not
@@ -198,7 +202,8 @@ their display text.
 
 During a request, events inside the enabled package span also contain
 `request_id` and `correlation_id`. Valid W3C context adds `trace_id`,
-`parent_id`, `trace_flags`, and `trace_sampled`.
+`parent_id`, `trace_flags`, and `trace_sampled`. Configured Level 2 additionally
+adds `trace_id_random`; Level 1 always omits it.
 
 The terminal record always has `message = "request completed"`. Its common
 semantic fields are:
@@ -208,8 +213,9 @@ semantic fields are:
 | `request_id` | string | Always; the validated or generated request ID |
 | `correlation_id` | string | Always; trace ID when valid W3C context exists, otherwise request ID |
 | `trace_id`, `parent_id` | string | Only with valid W3C context |
-| `trace_flags` | number | Only with valid W3C context; the flags byte |
+| `trace_flags` | string | Only with valid W3C context; exactly two lowercase hexadecimal characters |
 | `trace_sampled` | boolean | Only with valid W3C context |
+| `trace_id_random` | boolean | Only with valid W3C context in configured Level 2 mode |
 | `method` | string | Always; HTTP method |
 | `path_template` | string | When Axum's `MatchedPath` is available |
 | `path` | string | Only with `with_raw_path(true)`; query-free concrete path |
@@ -223,13 +229,20 @@ semantic fields are:
 
 Optional values are omitted; the formatter does not emit `null` placeholders.
 Normal completion omits `terminal_reason` and `error`. The default level is
-`ERROR` for 5xx, `WARN` for 4xx, and `INFO` otherwise. Application events cannot
-replace package correlation, envelope, or provider fields. Access enrichment
-cannot replace terminal access fields either; package-owned fields win.
+`ERROR` for every abnormal terminal reason or a normal 5xx, `WARN` for a
+normal 4xx, and `INFO` otherwise. The status-level mapper applies only to
+normal completion. Application events cannot replace package correlation,
+envelope, or provider fields. Access enrichment cannot replace terminal access
+fields either; package-owned fields win.
 
 `path_template` is the default low-cardinality aggregation key. Concrete `path`
 can have unbounded cardinality and may contain identifying data, so it is off by
 default.
+
+Axum 0.8 `MatchedPath` already uses the portable whole-segment `{name}` and
+terminal `{*name}` forms. Different concrete parameter or catch-all values
+therefore retain one template, and unmatched routes omit route and operation
+identity rather than substituting the request path.
 
 ## Operation IDs
 
@@ -263,7 +276,9 @@ terminal middleware then map the same captured semantic record.
   `requestUrl`, `remoteIp`, and `userAgent`; method, status, and latency use
   `requestMethod`, numeric `status`, and a seconds string. The trace field is
   the bare validated 32-character W3C trace ID. The crate never emits a fake
-  `logging.googleapis.com/spanId`.
+  `logging.googleapis.com/spanId`. Selecting `Gcp` resolves to the newest GCP
+  profile implemented by the installed crate, currently `0.1.0`; use
+  `with_gcp_profile_version(GcpProfileVersion::V0_1_0)` for an exact pin.
 - `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. It does not create an X-Ray
   segment or parse `X-Amzn-Trace-Id`.
 - `Azure` adds `operation_Id` and `operation_ParentId`. It does not initialize
@@ -287,7 +302,7 @@ The body wrapper owns a one-shot terminal guard:
 - an inner service error emits one `service_error` record and returns the
   original service error;
 - dropping an unfinished response or service future emits one
-  `response_dropped` record; and
+  `response_dropped` record at `ERROR`; and
 - once the guard completes, later polling or drop cannot emit a duplicate.
 
 Status and duration reflect the latest trustworthy state. If the response was
@@ -310,6 +325,8 @@ remain responsible for choosing and monitoring the output destination.
 | Method | Default | Purpose |
 | --- | --- | --- |
 | `with_field_convention` | `FieldConvention::Generic` | Select one provider field convention |
+| `with_gcp_profile_version` | latest supported GCP version | Select and pin an exact GCP profile version |
+| `with_trace_context_level` | `TraceContextLevel::Level1` | Select W3C Trace Context Level 1 or Level 2 |
 | `with_request_id_header` | `x-request-id` | Set the request and response correlation header |
 | `with_response_header` | `true` | Enable or disable response-header injection |
 | `with_raw_path` | `false` | Opt into query-free concrete path capture |
@@ -320,6 +337,11 @@ remain responsible for choosing and monitoring the output destination.
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |
 | `with_access_enricher` | no extra fields | Add synchronous application-owned terminal fields |
+
+`gcp_profile_version()` and `trace_context_level()` expose the resolved
+non-secret settings for diagnostics and conformance evidence. Unsupported
+dynamic GCP pins fail when parsed as `GcpProfileVersion`; no network lookup is
+performed.
 
 Unknown options do not exist: configuration is compile-time checked. The header
 setter accepts a validated `http::HeaderName`; use `HeaderName::from_static` or

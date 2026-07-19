@@ -1,6 +1,66 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
+async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/items/{item_id}",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_item")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .route(
+            "/files/{*path}",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_file")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+
+    for uri in [
+        "/items/tenant-a",
+        "/items/tenant-b",
+        "/files/tenant-a/one",
+        "/files/tenant-b/two",
+        "/missing/private-value",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 5);
+    for record in &records[0..2] {
+        assert_eq!(record["path_template"], "/items/{item_id}");
+        assert_eq!(record["operation_id"], "get_item");
+    }
+    for record in &records[2..4] {
+        assert_eq!(record["path_template"], "/files/{*path}");
+        assert_eq!(record["operation_id"], "get_file");
+    }
+    assert!(records[4].get("path_template").is_none());
+    assert!(records[4].get("operation_id").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn field_conventions_emit_exact_provider_trace_shapes() {
     for (convention, key, expected) in [
         (
@@ -99,7 +159,9 @@ async fn field_conventions_emit_exact_non_conflicting_access_schemas() {
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "unexpected {convention:?} schema");
         assert!(record["status"].is_u64());
-        assert!(record["duration_ms"].is_f64());
+        assert!(record["duration_ms"].is_number());
+        assert_eq!(record["trace_flags"], "01");
+        assert!(record.get("trace_id_random").is_none());
         assert_eq!(record["path"], "/items/42");
         assert!(!record.to_string().contains("secret=query"));
     }

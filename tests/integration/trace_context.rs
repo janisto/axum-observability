@@ -19,7 +19,7 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         .header("x-request-id", "request-42")
         .header(
             "traceparent",
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
         )
         .header("tracestate", "vendor=value")
         .body(Body::empty())
@@ -33,6 +33,9 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         assert_eq!(record["request_id"], "request-42");
         assert_eq!(record["correlation_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(record["severity"], "INFO");
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert!(record.get("trace_id_random").is_none());
         assert_eq!(
             record["logging.googleapis.com/trace"],
             "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -46,6 +49,45 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
     assert_eq!(records[1]["httpRequest"]["requestMethod"], "GET");
     assert!(records[1]["httpRequest"].get("requestUrl").is_none());
     assert!(records[1]["httpRequest"]["status"].is_u64());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_level_two_projects_random_flag_and_uses_level_two_tracestate_grammar() {
+    async fn handler(context: RequestContext) -> StatusCode {
+        let trace = context.trace_context().expect("trace context");
+        assert_eq!(trace.trace_context_level(), TraceContextLevel::Level2);
+        assert_eq!(trace.trace_id_random(), Some(true));
+        assert_eq!(trace.tracestate(), Some("tenant@system@edge=value"));
+        tracing::info!("application event");
+        StatusCode::NO_CONTENT
+    }
+
+    let config = ObservabilityConfig::default().with_trace_context_level(TraceContextLevel::Level2);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(handler))
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "level-two-request")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+        )
+        .header("tracestate", "tenant@system@edge=value")
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert_eq!(record["trace_id_random"], true);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -4,18 +4,27 @@ set shell := ["bash", "-ceu"]
     just --list
 
 [group('lifecycle')]
-install:
+install: download install-tools
+
+[group('lifecycle')]
+install-tools:
+    cargo install --locked cargo-edit
+    cargo install --locked cargo-llvm-cov
+    cargo install --locked cargo-deny
+    cargo install --locked cargo-audit
+    cargo install --locked cargo-mutants
+    cargo install --locked cargo-sort
+    cargo install --locked cargo-machete
+
+[group('lifecycle')]
+download:
     cargo fetch --locked
-    cargo install --locked cargo-deny --version 0.20.2
-    cargo install --locked cargo-audit --version 0.22.2
-    cargo install --locked cargo-mutants --version 27.1.0
-    cargo install --locked cargo-llvm-cov --version 0.8.7
-    cargo install --locked cargo-sort --version 2.1.3
-    cargo install --locked cargo-machete --version 0.9.2
 
 [group('lifecycle')]
 update:
+    cargo upgrade --incompatible allow
     cargo update
+    cargo fetch --locked
 
 [group('qa')]
 fmt:

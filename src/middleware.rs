@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "peer-ip")]
@@ -28,8 +28,9 @@ use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::{
-    FieldConvention, JsonLayer, OperationId, RequestContext, RequestId, TraceContext,
-    trace_context::{parse_traceparent, parse_tracestate},
+    FieldConvention, GcpProfileVersion, JsonLayer, OperationId, RequestContext, RequestId,
+    TraceContext, TraceContextLevel,
+    trace_context::{parse_traceparent_with_level, parse_tracestate_with_level},
 };
 
 type Generator = Arc<dyn Fn() -> Option<RequestId> + Send + Sync>;
@@ -47,6 +48,8 @@ type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + 
 )]
 pub struct ObservabilityConfig {
     pub(crate) field_convention: FieldConvention,
+    gcp_profile_version: Option<GcpProfileVersion>,
+    trace_context_level: TraceContextLevel,
     request_id_header: HeaderName,
     response_header: bool,
     raw_path: bool,
@@ -65,6 +68,8 @@ impl fmt::Debug for ObservabilityConfig {
         let mut debug = formatter.debug_struct("ObservabilityConfig");
         debug
             .field("field_convention", &self.field_convention)
+            .field("gcp_profile_version", &self.gcp_profile_version)
+            .field("trace_context_level", &self.trace_context_level)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
             .field("raw_path", &self.raw_path);
@@ -80,6 +85,8 @@ impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             field_convention: FieldConvention::Generic,
+            gcp_profile_version: None,
+            trace_context_level: TraceContextLevel::Level1,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
             raw_path: false,
@@ -100,7 +107,39 @@ impl ObservabilityConfig {
     #[must_use = "configuration builders return a new value"]
     pub fn with_field_convention(mut self, convention: FieldConvention) -> Self {
         self.field_convention = convention;
+        self.gcp_profile_version =
+            (convention == FieldConvention::Gcp).then_some(GcpProfileVersion::LATEST);
         self
+    }
+
+    /// Selects an exact supported Google Cloud structured-stdout profile.
+    ///
+    /// Use [`Self::with_field_convention`] with [`FieldConvention::Gcp`] to
+    /// select the newest profile implemented by this installed crate.
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_gcp_profile_version(mut self, version: GcpProfileVersion) -> Self {
+        self.field_convention = FieldConvention::Gcp;
+        self.gcp_profile_version = Some(version);
+        self
+    }
+
+    /// Returns the resolved Google Cloud profile version, when selected.
+    #[must_use]
+    pub const fn gcp_profile_version(&self) -> Option<GcpProfileVersion> {
+        self.gcp_profile_version
+    }
+
+    /// Selects the W3C Trace Context level used for inbound requests.
+    #[must_use = "configuration builders return a new value"]
+    pub const fn with_trace_context_level(mut self, level: TraceContextLevel) -> Self {
+        self.trace_context_level = level;
+        self
+    }
+
+    /// Returns the resolved W3C Trace Context level.
+    #[must_use]
+    pub const fn trace_context_level(&self) -> TraceContextLevel {
+        self.trace_context_level
     }
 
     /// Sets the request and response correlation header name.
@@ -295,7 +334,8 @@ where
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
         let request_id = select_request_id(request.headers_mut(), &self.config);
-        let trace_context = select_trace_context(request.headers());
+        let trace_context =
+            select_trace_context(request.headers(), self.config.trace_context_level);
         let request_context = RequestContext::new(request_id, trace_context);
         let metadata = RequestMetadata::from_request(&request, &self.config);
         let span = request_span(&request_context);
@@ -379,35 +419,53 @@ fn random_request_id() -> RequestId {
         .expect("UUID simple formatting satisfies the request-ID contract")
 }
 
-fn select_trace_context(headers: &HeaderMap) -> Option<TraceContext> {
+fn select_trace_context(headers: &HeaderMap, level: TraceContextLevel) -> Option<TraceContext> {
     let mut parents = headers.get_all("traceparent").iter();
     let first = parents.next()?.to_str().ok()?;
     if parents.next().is_some() {
         return None;
     }
-    let trace = parse_traceparent(first)?;
+    let trace = parse_traceparent_with_level(first, level)?;
 
     let states = headers
         .get_all("tracestate")
         .iter()
         .map(HeaderValue::to_str)
         .collect::<Result<Vec<_>, _>>();
-    let tracestate = states.ok().and_then(parse_tracestate);
+    let tracestate = states
+        .ok()
+        .and_then(|values| parse_tracestate_with_level(values, level));
     Some(trace.with_tracestate(tracestate))
 }
 
 fn request_span(context: &RequestContext) -> Span {
     if let Some(trace) = context.trace_context() {
-        tracing::info_span!(
-            target: "axum_observability::request",
-            "request",
-            request_id = %context.request_id(),
-            correlation_id = context.correlation_id(),
-            trace_id = trace.trace_id(),
-            parent_id = trace.parent_id(),
-            trace_flags = u64::from(trace.flags()),
-            trace_sampled = trace.sampled(),
-        )
+        let flags = format!("{:02x}", trace.flags());
+        if let Some(random) = trace.trace_id_random() {
+            tracing::info_span!(
+                target: "axum_observability::request",
+                "request",
+                request_id = %context.request_id(),
+                correlation_id = context.correlation_id(),
+                trace_id = trace.trace_id(),
+                parent_id = trace.parent_id(),
+                trace_flags = flags.as_str(),
+                trace_sampled = trace.sampled(),
+                trace_id_random = random,
+            )
+        } else {
+            tracing::info_span!(
+                target: "axum_observability::request",
+                "request",
+                request_id = %context.request_id(),
+                correlation_id = context.correlation_id(),
+                trace_id = trace.trace_id(),
+                parent_id = trace.parent_id(),
+                trace_flags = flags.as_str(),
+                trace_sampled = trace.sampled(),
+                trace_id_random = tracing::field::Empty,
+            )
+        }
     } else {
         tracing::info_span!(
             target: "axum_observability::request",
@@ -418,6 +476,7 @@ fn request_span(context: &RequestContext) -> Span {
             parent_id = tracing::field::Empty,
             trace_flags = tracing::field::Empty,
             trace_sampled = tracing::field::Empty,
+            trace_id_random = tracing::field::Empty,
         )
     }
 }
@@ -450,7 +509,7 @@ impl RequestMetadata {
             path_template: request
                 .extensions()
                 .get::<MatchedPath>()
-                .map(|path| path.as_str().to_owned()),
+                .and_then(|path| canonical_route_template(path.as_str())),
             operation_id: request
                 .extensions()
                 .get::<OperationId>()
@@ -460,6 +519,85 @@ impl RequestMetadata {
                 .user_agent
                 .then(|| exactly_one_header(request.headers(), &USER_AGENT))
                 .flatten(),
+        }
+    }
+}
+
+fn canonical_route_template(native: &str) -> Option<String> {
+    if !native.starts_with('/') || native.contains('?') || native.contains('#') {
+        return None;
+    }
+    let segments = native[1..].split('/').collect::<Vec<_>>();
+    let mut canonical = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        if let Some(name) = segment
+            .strip_prefix("{*")
+            .and_then(|value| value.strip_suffix('}'))
+        {
+            if index != segments.len() - 1 || !is_route_parameter_name(name) {
+                return None;
+            }
+            canonical.push(*segment);
+        } else if let Some(name) = segment
+            .strip_prefix('{')
+            .and_then(|value| value.strip_suffix('}'))
+        {
+            if !is_route_parameter_name(name) {
+                return None;
+            }
+            canonical.push(*segment);
+        } else if segment.contains(['{', '}', '*']) {
+            return None;
+        } else {
+            canonical.push(*segment);
+        }
+    }
+    Some(format!("/{}", canonical.join("/")))
+}
+
+fn is_route_parameter_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let Some(first) = bytes.first() else {
+        return false;
+    };
+    if bytes.len() > 64 || !first.is_ascii_alphabetic() && *first != b'_' {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+#[cfg(test)]
+mod route_template_tests {
+    use super::canonical_route_template;
+
+    #[test]
+    fn canonical_route_template_accepts_only_the_shared_axum_forms() {
+        for (native, expected) in [
+            ("/health".to_owned(), Some("/health".to_owned())),
+            (
+                "/items/{item_id}".to_owned(),
+                Some("/items/{item_id}".to_owned()),
+            ),
+            (
+                "/files/{*path}".to_owned(),
+                Some("/files/{*path}".to_owned()),
+            ),
+            (
+                format!("/items/{{{}}}", "a".repeat(64)),
+                Some(format!("/items/{{{}}}", "a".repeat(64))),
+            ),
+            (format!("/items/{{{}}}", "a".repeat(65)), None),
+            ("/items/{0item}".to_owned(), None),
+            ("/items/{item-id}".to_owned(), None),
+            ("/files/{*path}/suffix".to_owned(), None),
+            ("/items/{item_id?}".to_owned(), None),
+            ("health".to_owned(), None),
+            ("/health?secret".to_owned(), None),
+            ("/health#fragment".to_owned(), None),
+        ] {
+            assert_eq!(canonical_route_template(&native), expected, "{native}");
         }
     }
 }
@@ -495,9 +633,11 @@ pub(crate) struct AccessRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    trace_flags: Option<u8>,
+    trace_flags: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_sampled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id_random: Option<bool>,
     method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -507,7 +647,7 @@ pub(crate) struct AccessRecord {
     operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
-    duration_ms: f64,
+    duration_ms: DurationMilliseconds,
     #[serde(skip_serializing_if = "Option::is_none")]
     peer_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -608,14 +748,15 @@ impl TerminalGuard {
             correlation_id: state.request_context.correlation_id().to_owned(),
             trace_id: trace.map(|trace| trace.trace_id().to_owned()),
             parent_id: trace.map(|trace| trace.parent_id().to_owned()),
-            trace_flags: trace.map(TraceContext::flags),
+            trace_flags: trace.map(|trace| format!("{:02x}", trace.flags())),
             trace_sampled: trace.map(TraceContext::sampled),
+            trace_id_random: trace.and_then(TraceContext::trace_id_random),
             method: state.metadata.method,
             path: state.metadata.path,
             path_template: state.metadata.path_template,
             operation_id: state.metadata.operation_id,
             status: state.status.map(|status| status.as_u16()),
-            duration_ms: duration.as_secs_f64() * 1_000.0,
+            duration_ms: duration_milliseconds(duration),
             peer_ip: state.metadata.peer_ip,
             user_agent: state.metadata.user_agent,
             terminal_reason: terminal_reason.map(str::to_owned),
@@ -630,11 +771,27 @@ impl TerminalGuard {
             TerminalOutcome::Completed => {
                 mapped_level(state.status.expect("completed response has a status"))
             }
-            TerminalOutcome::ServiceError | TerminalOutcome::BodyError => Level::ERROR,
-            TerminalOutcome::ResponseDropped => state.status.map_or(Level::WARN, mapped_level),
+            TerminalOutcome::ServiceError
+            | TerminalOutcome::BodyError
+            | TerminalOutcome::ResponseDropped => Level::ERROR,
         };
         let serialized = serde_json::to_string(&record).expect("access record is serializable");
         state.span.in_scope(|| emit_access(level, &serialized));
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum DurationMilliseconds {
+    Integer(u128),
+    Fractional(f64),
+}
+
+fn duration_milliseconds(duration: Duration) -> DurationMilliseconds {
+    if duration.subsec_nanos().is_multiple_of(1_000_000) {
+        DurationMilliseconds::Integer(duration.as_millis())
+    } else {
+        DurationMilliseconds::Fractional(duration.as_secs_f64() * 1_000.0)
     }
 }
 

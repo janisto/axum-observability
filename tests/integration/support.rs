@@ -223,10 +223,10 @@ pub(super) async fn custom_identity_handler(context: RequestContext, headers: He
     )
 }
 
-async fn gcp_health_handler() -> &'static str {
+async fn gcp_health_handler() -> impl IntoResponse {
     tracing::info!(
         service_name = "example-service",
-        service_version = "0.3.0",
+        service_version = "1.0.0",
         health_status = "ok",
         "health check"
     );
@@ -236,13 +236,25 @@ async fn gcp_health_handler() -> &'static str {
         check_duration_ms = 3_u64,
         "dependency check"
     );
-    "ok"
+    (Extension(OperationId::from_static("health_check")), "ok")
 }
 
-pub(super) async fn gcp_health_records(filter: LevelFilter) -> (StatusCode, Bytes, Vec<Value>) {
+pub(super) async fn health_records(
+    convention: FieldConvention,
+    filter: LevelFilter,
+) -> (StatusCode, Bytes, Vec<Value>) {
+    let origin = Instant::now();
+    let clock_calls = Arc::new(AtomicUsize::new(0));
+    let calls = clock_calls.clone();
     let config = ObservabilityConfig::default()
-        .with_field_convention(FieldConvention::Gcp)
-        .with_raw_path(true);
+        .with_field_convention(convention)
+        .with_clock(move || {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                origin
+            } else {
+                origin + Duration::from_micros(12_500)
+            }
+        });
     let capture = Capture::default();
     let layer = config
         .json_layer(capture.clone())

@@ -48,6 +48,13 @@ into human onboarding documentation.
 
 - Keep `plans/` ignored. Planning and mutation-campaign notes are local and
   must not ship in the crate or repository.
+- Keep compatible dependency requirements in `Cargo.toml`, exact repository
+  resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Never
+  edit the lockfile manually.
+- Keep Cargo CLI tools shared by local and hosted checks aligned between the
+  `Justfile` and workflows. Install them with `cargo install --locked` and do
+  not hard-code tool versions that Dependabot cannot maintain; CI-only tools
+  may remain workflow-only.
 - Preserve `#![forbid(unsafe_code)]`, the Rust 1.97.0 support line, and stable
   Rust APIs.
 - Do not add OpenTelemetry, a cloud SDK, a global subscriber, or logging of

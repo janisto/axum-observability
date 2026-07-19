@@ -5,6 +5,7 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
     let generator_secret = "generator-secret-must-not-leak".to_owned();
     let config = ObservabilityConfig::default()
         .with_field_convention(FieldConvention::Aws)
+        .with_trace_context_level(TraceContextLevel::Level2)
         .with_request_id_header(HeaderName::from_static("x-correlation-id"))
         .with_response_header(false)
         .with_raw_path(true)
@@ -20,6 +21,7 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
     for expected in [
         "ObservabilityConfig",
         "field_convention: Aws",
+        "trace_context_level: Level2",
         "request_id_header: \"x-correlation-id\"",
         "response_header: false",
         "raw_path: true",
@@ -45,6 +47,36 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
         );
     }
     assert!(!debug.contains("generator-secret-must-not-leak"));
+}
+
+#[test]
+fn trace_context_level_defaults_to_one_and_can_be_selected_explicitly() {
+    let level_one = ObservabilityConfig::default();
+    assert_eq!(level_one.trace_context_level(), TraceContextLevel::Level1);
+
+    let level_two = level_one.with_trace_context_level(TraceContextLevel::Level2);
+    assert_eq!(level_two.trace_context_level(), TraceContextLevel::Level2);
+}
+
+#[test]
+fn gcp_profile_resolution_uses_latest_and_clears_stale_state() {
+    let latest = ObservabilityConfig::default().with_field_convention(FieldConvention::Gcp);
+    assert_eq!(
+        latest.gcp_profile_version(),
+        Some(GcpProfileVersion::V0_1_0)
+    );
+    assert!(
+        format!("{latest:?}").contains("gcp_profile_version: Some(GcpProfileVersion(\"0.1.0\"))")
+    );
+
+    let pinned = ObservabilityConfig::default().with_gcp_profile_version(GcpProfileVersion::V0_1_0);
+    assert_eq!(
+        pinned.gcp_profile_version(),
+        Some(GcpProfileVersion::V0_1_0)
+    );
+
+    let generic = pinned.with_field_convention(FieldConvention::Generic);
+    assert_eq!(generic.gcp_profile_version(), None);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -141,7 +173,8 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
     let records = capture.records();
     let record = &records[0];
     assert_eq!(record["level"], "ERROR");
-    assert_eq!(record["duration_ms"], 1_500.0);
+    assert_eq!(record["duration_ms"], 1_500);
+    assert!(record["duration_ms"].is_u64());
     assert_eq!(record["tenant"], "public");
     assert_eq!(record["status"], 200);
     assert_eq!(record["target"], "axum_observability::access");
