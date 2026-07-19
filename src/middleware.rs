@@ -203,8 +203,9 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Sets a fallible request ID generator. It is invoked once per replacement
-    /// request before the crate falls back to a package-owned random identifier.
+    /// Sets a fallible request ID generator. It is invoked up to twice per
+    /// replacement request before the crate falls back to a package-owned
+    /// random identifier.
     #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_generator(
         mut self,
@@ -268,11 +269,13 @@ impl ObservabilityConfig {
     }
 
     fn generate_request_id(&self) -> RequestId {
-        let generated = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
-            .ok()
-            .flatten();
-        if let Some(value) = generated.filter(|value| self.accepts_request_id(value)) {
-            return value;
+        for _ in 0..2 {
+            if let Some(value) = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
+                .ok()
+                .flatten()
+            {
+                return value;
+            }
         }
 
         random_request_id()
@@ -621,7 +624,15 @@ fn peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<St
 fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let first = values.next()?.to_str().ok()?;
-    values.next().is_none().then(|| first.to_owned())
+    if values.next().is_some()
+        || first.is_empty()
+        || first
+            .chars()
+            .any(|character| character <= '\u{1f}' || character == '\u{7f}')
+    {
+        return None;
+    }
+    Some(first.to_owned())
 }
 
 #[derive(Debug, Serialize)]
@@ -654,8 +665,6 @@ pub(crate) struct AccessRecord {
     user_agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
     enrichment: BTreeMap<String, Value>,
 }
 
@@ -682,12 +691,12 @@ enum TerminalOutcome {
 }
 
 impl TerminalOutcome {
-    const fn record_fields(self) -> (Option<&'static str>, Option<&'static str>) {
+    const fn terminal_reason(self) -> Option<&'static str> {
         match self {
-            Self::Completed => (None, None),
-            Self::ServiceError => (Some("service_error"), Some("downstream service failed")),
-            Self::BodyError => (Some("body_error"), Some("response body failed")),
-            Self::ResponseDropped => (Some("response_dropped"), None),
+            Self::Completed => None,
+            Self::ServiceError => Some("service_error"),
+            Self::BodyError => Some("body_error"),
+            Self::ResponseDropped => Some("response_dropped"),
         }
     }
 }
@@ -742,7 +751,7 @@ impl TerminalGuard {
             catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
         let duration = finished.saturating_duration_since(state.started);
         let trace = state.request_context.trace_context();
-        let (terminal_reason, error) = outcome.record_fields();
+        let terminal_reason = outcome.terminal_reason();
         let record = AccessRecord {
             request_id: state.request_context.request_id().as_str().to_owned(),
             correlation_id: state.request_context.correlation_id().to_owned(),
@@ -760,7 +769,6 @@ impl TerminalGuard {
             peer_ip: state.metadata.peer_ip,
             user_agent: state.metadata.user_agent,
             terminal_reason: terminal_reason.map(str::to_owned),
-            error: error.map(str::to_owned),
             enrichment: state.enrichment,
         };
         let mapped_level = |status| {

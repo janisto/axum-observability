@@ -26,6 +26,8 @@ All notable changes to this project are documented here. The format is based on
   committed status or the normal-response status mapper.
 - Validate Axum `MatchedPath` parameter and terminal catch-all names before
   emitting the already-canonical route template; unsafe forms are omitted.
+- Stop synthesizing fixed `error` summaries for body and service failures, and
+  prevent application events from occupying access-catalog field names.
 
 ## [1.0.0] - 2026-07-17
 

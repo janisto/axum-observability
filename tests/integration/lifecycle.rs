@@ -216,7 +216,7 @@ async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn body_error_emits_once_with_controlled_error_information() {
+async fn body_error_emits_once_without_inventing_error_information() {
     let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::TRACE);
     let capture = Capture::default();
     let filtered = config
@@ -240,7 +240,7 @@ async fn body_error_emits_once_with_controlled_error_information() {
     assert_eq!(records[0]["status"], 200);
     assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "body_error");
-    assert_eq!(records[0]["error"], "response body failed");
+    assert!(records[0].get("error").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -266,7 +266,7 @@ async fn service_error_is_returned_and_emitted_once_at_error() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "service_error");
-    assert_eq!(records[0]["error"], "downstream service failed");
+    assert!(records[0].get("error").is_none());
     assert!(records[0].get("status").is_none());
 }
 

@@ -167,10 +167,11 @@ The selected value is available from:
 - the configured response header, unless disabled.
 
 Configuration can change the request/response header name, disable the response
-header, narrow validation, or supply a fallible generator. Generated values
-use `RequestId`, making baseline validity explicit. A generator is invoked once
-per replacement request before the package-owned fallback is used, and callback
-failure never produces an invalid ID.
+header, narrow caller-input validation, or supply a fallible generator.
+Generated values use `RequestId`, making baseline validity explicit, and the
+custom validator is never applied to them. A generator is invoked exactly
+twice unless its first result succeeds before the package-owned fallback is
+used, and callback failure never produces an invalid ID or alters traffic.
 
 `traceparent` parsing rejects duplicates, uppercase hexadecimal, zero trace or
 parent IDs, invalid framing and flags, and oversized input. Version `00` must
@@ -225,15 +226,16 @@ semantic fields are:
 | `peer_ip` | string | Only with the `peer-ip` feature, `with_peer_ip(true)`, and `ConnectInfo` |
 | `user_agent` | string | Only with `with_user_agent(true)` and one text header value |
 | `terminal_reason` | string | Only for `body_error`, `service_error`, or `response_dropped` |
-| `error` | string | Controlled package text only for body or service failure |
 
 Optional values are omitted; the formatter does not emit `null` placeholders.
-Normal completion omits `terminal_reason` and `error`. The default level is
+Normal completion omits `terminal_reason`; abnormal records do not invent an
+`error` summary when the original failure is unavailable. The default level is
 `ERROR` for every abnormal terminal reason or a normal 5xx, `WARN` for a
 normal 4xx, and `INFO` otherwise. The status-level mapper applies only to
 normal completion. Application events cannot replace package correlation,
-envelope, or provider fields. Access enrichment cannot replace terminal access
-fields either; package-owned fields win.
+envelope, provider, or access-catalog fields. Access enrichment cannot replace
+terminal access fields either; package-owned fields win. Application `error`
+fields remain native application data and are not synthesized on access lines.
 
 `path_template` is the default low-cardinality aggregation key. Concrete `path`
 can have unbounded cardinality and may contain identifying data, so it is off by
@@ -332,8 +334,8 @@ remain responsible for choosing and monitoring the output destination.
 | `with_raw_path` | `false` | Opt into query-free concrete path capture |
 | `with_peer_ip` | `false` | With the `peer-ip` feature, opt into trusted socket-peer capture |
 | `with_user_agent` | `false` | Opt into one unambiguous text User-Agent value |
-| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked once per replacement |
-| `with_request_id_validator` | accepts baseline | Narrow accepted IDs without weakening the baseline |
+| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked up to twice per replacement |
+| `with_request_id_validator` | accepts baseline | Narrow caller-provided IDs without weakening the baseline |
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |
 | `with_access_enricher` | no extra fields | Add synchronous application-owned terminal fields |

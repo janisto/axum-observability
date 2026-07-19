@@ -202,7 +202,7 @@ impl OperationId {
     ///
     /// # Panics
     ///
-    /// Panics when `value` is empty.
+    /// Panics when `value` is empty or contains an ASCII control character.
     ///
     /// # Examples
     ///
@@ -216,6 +216,15 @@ impl OperationId {
     #[must_use]
     pub const fn from_static(value: &'static str) -> Self {
         assert!(!value.is_empty(), "operation ID must not be empty");
+        let bytes = value.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            assert!(
+                bytes[index] >= 0x20 && bytes[index] != 0x7f,
+                "operation ID must not contain control characters"
+            );
+            index += 1;
+        }
         Self(value)
     }
 
@@ -254,5 +263,11 @@ mod tests {
     #[should_panic(expected = "operation ID must not be empty")]
     fn operation_id_rejects_empty_static_values() {
         let _ = OperationId::from_static("");
+    }
+
+    #[test]
+    #[should_panic(expected = "operation ID must not contain control characters")]
+    fn operation_id_rejects_control_characters() {
+        let _ = OperationId::from_static("create-item\nforged");
     }
 }

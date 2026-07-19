@@ -147,7 +147,7 @@ async fn replaces_duplicate_ids_and_invokes_the_generator_once() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything() {
+async fn generator_failure_is_retried_then_falls_back_without_applying_custom_validator() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default()
@@ -174,11 +174,11 @@ async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything
         id.bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generator_none_and_validator_rejection_use_package_owned_ids() {
+async fn generator_none_falls_back_and_validator_applies_only_to_caller_input() {
     let none_config = ObservabilityConfig::default().with_request_id_generator(|| None);
     let none_app = Router::new()
         .route("/", get(context_handler))
@@ -213,7 +213,6 @@ async fn generator_none_and_validator_rejection_use_package_owned_ids() {
     let rejected_id = rejected_response.headers()["x-request-id"]
         .to_str()
         .expect("request ID text");
-    assert_ne!(rejected_id, "validator-rejected");
-    assert!(RequestId::parse(rejected_id).is_ok());
+    assert_eq!(rejected_id, "validator-rejected");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }

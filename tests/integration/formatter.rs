@@ -51,6 +51,15 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
         ready = true,
         error = &error as &dyn std::error::Error,
         severity = "spoofed",
+        method = "POST",
+        path = "/spoofed",
+        path_template = "/{spoofed}",
+        operation_id = "spoofed_operation",
+        status = 599_u64,
+        duration_ms = 999_u64,
+        peer_ip = "203.0.113.9",
+        user_agent = "spoofed-agent",
+        terminal_reason = "service_error",
         "background event"
     );
 
@@ -64,6 +73,19 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
     assert_eq!(record["error"], "controlled application error");
     assert_eq!(record["level"], "INFO");
     assert!(record.get("severity").is_none());
+    for reserved in [
+        "method",
+        "path",
+        "path_template",
+        "operation_id",
+        "status",
+        "duration_ms",
+        "peer_ip",
+        "user_agent",
+        "terminal_reason",
+    ] {
+        assert!(record.get(reserved).is_none(), "reserved field {reserved}");
+    }
     assert!(record["timestamp"].is_string());
     assert!(record.get("request_id").is_none());
 }

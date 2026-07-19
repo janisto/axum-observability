@@ -446,10 +446,27 @@ async fn ambiguous_or_non_text_user_agent_is_omitted() {
         )
         .body(Body::empty())
         .expect("request");
-    app.oneshot(request).await.expect("response");
+    app.clone().oneshot(request).await.expect("response");
+
+    let empty = Request::builder()
+        .uri("/")
+        .header("user-agent", HeaderValue::from_static(""))
+        .body(Body::empty())
+        .expect("request");
+    app.clone().oneshot(empty).await.expect("response");
+
+    let tab = Request::builder()
+        .uri("/")
+        .header(
+            "user-agent",
+            HeaderValue::from_bytes(b"agent/1\tforged").expect("header with tab"),
+        )
+        .body(Body::empty())
+        .expect("request");
+    app.oneshot(tab).await.expect("response");
 
     let records = capture.records();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 4);
     assert!(
         records
             .iter()
