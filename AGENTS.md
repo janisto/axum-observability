@@ -92,6 +92,8 @@ into human onboarding documentation.
   version tags.
 - `just qa` must run `actionlint` and `zizmor --offline .` in addition to the
   repository's language checks.
+- Do not add standalone repository scripts, including under `.github`. Enforce
+  repository policy through the existing native test suite and tooling.
 - Keep `.github/zizmor.yml` aligned with the exact-tag policy and the
   one-day Dependabot cooldown.
 

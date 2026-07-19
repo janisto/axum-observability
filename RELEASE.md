@@ -215,14 +215,11 @@ interactive credential.
 
 Check the GitHub Release and annotated tag:
 
-Every direct `gh api` call in this repository must send
-`X-GitHub-Api-Version: 2026-03-10`.
-
 ```bash
 gh release view "v$VERSION" \
   --json tagName,name,url,isDraft,isPrerelease,publishedAt,targetCommitish
 
-gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+gh api \
   "repos/janisto/axum-observability/git/ref/tags/v$VERSION" \
   --jq '.object.type + " " + .object.sha'
 ```
@@ -232,11 +229,10 @@ annotated tag and require the reviewed commit:
 
 ```bash
 TAG_OBJECT="$(gh api \
-  -H "X-GitHub-Api-Version: 2026-03-10" \
   "repos/janisto/axum-observability/git/ref/tags/v$VERSION" \
   --jq .object.sha)"
 
-gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+gh api \
   "repos/janisto/axum-observability/git/tags/$TAG_OBJECT" \
   --jq '.object.type + " " + .object.sha'
 ```
