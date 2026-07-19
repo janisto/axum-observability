@@ -508,7 +508,10 @@ impl RequestMetadata {
     fn from_request(request: &Request<Body>, config: &ObservabilityConfig) -> Self {
         Self {
             method: request.method().to_string(),
-            path: config.raw_path.then(|| request.uri().path().to_owned()),
+            path: config
+                .raw_path
+                .then(|| canonical_raw_path(request.uri().path()))
+                .flatten(),
             path_template: request
                 .extensions()
                 .get::<MatchedPath>()
@@ -524,6 +527,19 @@ impl RequestMetadata {
                 .flatten(),
         }
     }
+}
+
+fn canonical_raw_path(value: &str) -> Option<String> {
+    if !value.starts_with('/') || value.contains(['?', '#']) {
+        return None;
+    }
+    for suffix in value.split('%').skip(1) {
+        let bytes = suffix.as_bytes();
+        if bytes.len() < 2 || !bytes[0].is_ascii_hexdigit() || !bytes[1].is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(value.to_owned())
 }
 
 fn canonical_route_template(native: &str) -> Option<String> {
@@ -573,7 +589,25 @@ fn is_route_parameter_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod route_template_tests {
-    use super::canonical_route_template;
+    use super::{canonical_raw_path, canonical_route_template};
+
+    #[test]
+    fn canonical_raw_path_preserves_origin_form_and_rejects_unsafe_framing() {
+        for (raw, expected) in [
+            ("/", Some("/")),
+            ("/objects/a%2Fb/%E2%9C%93", Some("/objects/a%2Fb/%E2%9C%93")),
+            ("objects/no-leading-slash", None),
+            ("/objects/query?secret", None),
+            ("/objects/fragment#secret", None),
+            ("/objects/bad%2", None),
+            ("/objects/bad%GG", None),
+            ("/objects/bad%2G", None),
+            ("/objects/bad%G2", None),
+            ("/a%20%G2", None),
+        ] {
+            assert_eq!(canonical_raw_path(raw).as_deref(), expected, "{raw}");
+        }
+    }
 
     #[test]
     fn canonical_route_template_accepts_only_the_shared_axum_forms() {

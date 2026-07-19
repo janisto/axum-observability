@@ -16,7 +16,25 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
 ];
 
-fn is_caller(line: &str) -> bool {
+fn client_aliases(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once('=')?;
+            if !["Octokit", "GitHub", "Github", "octokit", "github"]
+                .iter()
+                .any(|marker| right.contains(marker))
+            {
+                return None;
+            }
+            left.split_whitespace()
+                .last()
+                .map(|alias| alias.trim_end_matches(':').to_owned())
+        })
+        .collect()
+}
+
+fn is_caller(line: &str, aliases: &[String]) -> bool {
     let normalized_whitespace = line.split_whitespace().collect::<Vec<_>>().join(" ");
     normalized_whitespace.contains("gh api")
         || line.contains("github.rest")
@@ -27,6 +45,11 @@ fn is_caller(line: &str) -> bool {
         || line.contains("octokit.paginate(")
         || line.contains("https://api.github.com")
         || line.contains("http://api.github.com")
+        || aliases.iter().any(|alias| {
+            [".rest", ".request(", ".paginate("]
+                .iter()
+                .any(|method| line.contains(&format!("{alias}{method}")))
+        })
 }
 
 fn has_locked_header(unit: &str) -> bool {
@@ -34,8 +57,9 @@ fn has_locked_header(unit: &str) -> bool {
         .chars()
         .filter(|character| !character.is_whitespace() && *character != '"' && *character != '\'')
         .collect::<String>();
-    compact.contains("X-GitHub-Api-Version:2026-03-10")
-        || compact.contains("X-GitHub-Api-Version=2026-03-10")
+    unit.matches("X-GitHub-Api-Version").count() == 1
+        && (compact.contains("X-GitHub-Api-Version:2026-03-10")
+            || compact.contains("X-GitHub-Api-Version=2026-03-10"))
 }
 
 fn is_automated_path(path: &str) -> bool {
@@ -60,13 +84,14 @@ fn policy_violations(files: &[(String, String)]) -> Vec<String> {
             continue;
         }
         let lines = content.lines().collect::<Vec<_>>();
+        let aliases = client_aliases(content);
         for (index, line) in lines.iter().enumerate() {
-            if !is_caller(line) {
+            if !is_caller(line, &aliases) {
                 continue;
             }
             let limit = lines.len().min(index + 12);
             let mut end = index + 1;
-            while end < limit && !is_caller(lines[end]) {
+            while end < limit && !is_caller(lines[end], &aliases) {
                 end += 1;
             }
             if !has_locked_header(&lines[index..end].join("\n")) {
@@ -143,6 +168,25 @@ fn one_pinned_caller_does_not_mask_an_unpinned_caller() {
         "client.rs".to_owned(),
         "github.request(\"GET /one\", header=\"X-GitHub-Api-Version: 2026-03-10\")\ngithub.request(\"GET /two\")"
             .to_owned(),
+    )];
+    assert_eq!(policy_violations(&files), ["client.rs:2"]);
+}
+
+#[test]
+fn conflicting_versions_in_one_caller_fail() {
+    let files = vec![(
+        "client.rs".to_owned(),
+        "github.request(\"GET /one\", header=\"X-GitHub-Api-Version: 2026-03-10\")\nheader=\"X-GitHub-Api-Version: 2022-11-28\""
+            .to_owned(),
+    )];
+    assert_eq!(policy_violations(&files), ["client.rs:1"]);
+}
+
+#[test]
+fn aliased_octokit_caller_is_detected() {
+    let files = vec![(
+        "client.rs".to_owned(),
+        "const client = new Octokit()\nclient.request(\"GET /repo\")".to_owned(),
     )];
     assert_eq!(policy_violations(&files), ["client.rs:2"]);
 }

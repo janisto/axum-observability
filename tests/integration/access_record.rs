@@ -420,6 +420,47 @@ async fn identifying_metadata_is_default_off_and_independently_opt_in() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn valid_encoded_paths_are_preserved_and_malformed_escapes_are_omitted() {
+    let config = ObservabilityConfig::default().with_raw_path(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(ObservabilityLayer::new(config));
+
+    for uri in [
+        "/objects/a%2Fb/%E2%9C%93",
+        "/objects/bad%2",
+        "/objects/bad%GG",
+        "/objects/bad%2G",
+        "/objects/bad%G2",
+        "/a%20%G2",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 6);
+    assert_eq!(records[0]["path"], "/objects/a%2Fb/%E2%9C%93");
+    for record in &records[1..] {
+        assert!(
+            record.get("path").is_none(),
+            "malformed path was emitted: {record}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn ambiguous_or_non_text_user_agent_is_omitted() {
     let config = ObservabilityConfig::default().with_user_agent(true);
     let capture = Capture::default();

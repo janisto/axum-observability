@@ -29,6 +29,10 @@ All notable changes to this project are documented here. The format is based on
 - Stop synthesizing fixed `error` summaries for body and service failures, and
   prevent application events from occupying access-catalog field names.
 
+### Fixed
+
+- Omit malformed percent-escaped raw paths instead of emitting them.
+
 ## [1.0.0] - 2026-07-17
 
 ### Changed

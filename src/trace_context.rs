@@ -248,6 +248,18 @@ mod tests {
     }
 
     #[test]
+    fn enforces_future_version_limit_in_utf8_bytes() {
+        let future = VALID.replacen("00-", "01-", 1);
+        let maximum = format!("{future}-{}", "é".repeat(228));
+        assert_eq!(maximum.chars().count(), 284);
+        assert_eq!(maximum.len(), 512);
+        assert!(parse_traceparent(&maximum).is_some());
+        let oversized = format!("{maximum}x");
+        assert_eq!(oversized.len(), 513);
+        assert!(parse_traceparent(&oversized).is_none());
+    }
+
+    #[test]
     fn rejects_invalid_future_delimiter_and_oversized_traceparent() {
         let future = VALID.replacen("00-", "01-", 1);
         for invalid in [
