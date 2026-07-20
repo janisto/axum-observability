@@ -16,8 +16,10 @@ pub(crate) fn parse_traceparent_with_level(
     level: TraceContextLevel,
 ) -> Option<TraceContext> {
     let bytes = value.as_bytes();
-    if !(55..=512).contains(&bytes.len())
-        || bytes.iter().any(|byte| !(0x20..=0x7e).contains(byte))
+    if bytes.len() < 55
+        || bytes
+            .iter()
+            .any(|byte| (*byte < 0x20 && *byte != b'\t') || *byte == 0x7f)
         || bytes[2] != b'-'
         || bytes[35] != b'-'
         || bytes[52] != b'-'
@@ -70,10 +72,6 @@ pub(crate) fn parse_tracestate_with_level<'a>(
         return None;
     }
     let combined = values.join(",");
-    if combined.len() > 512 {
-        return None;
-    }
-
     let mut seen = HashSet::new();
     let members = combined
         .split(',')
@@ -264,10 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn enforces_printable_ascii_and_the_future_version_wire_boundary() {
+    fn enforces_native_field_safety_without_an_invented_length_ceiling() {
         let future = VALID.replacen("00-", "01-", 1);
         for invalid in [
-            format!("{future}-opaque-ümlaut"),
             format!("{future}-opaque\u{1f}"),
             format!("{future}-opaque\u{7f}"),
         ] {
@@ -276,26 +273,20 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
-        let maximum = format!("{future}-{}", "x".repeat(456));
-        assert_eq!(maximum.len(), 512);
-        assert!(parse_traceparent(&maximum).is_some());
-        let oversized = format!("{maximum}x");
-        assert_eq!(oversized.len(), 513);
-        assert!(parse_traceparent(&oversized).is_none());
+        let long = format!("{future}-{}", "x".repeat(512));
+        assert!(long.len() > 512);
+        assert!(parse_traceparent(&long).is_some());
+        assert!(parse_traceparent(&format!("{future}-opaque-ümlaut")).is_some());
     }
 
     #[test]
-    fn rejects_invalid_future_delimiter_and_oversized_traceparent() {
+    fn rejects_invalid_future_delimiter() {
         let future = VALID.replacen("00-", "01-", 1);
-        for invalid in [
-            format!("{future}vendor"),
-            format!("{future}-{}", "x".repeat(512)),
-        ] {
-            assert!(
-                parse_traceparent(&invalid).is_none(),
-                "accepted {invalid:?}"
-            );
-        }
+        let invalid = format!("{future}vendor");
+        assert!(
+            parse_traceparent(&invalid).is_none(),
+            "accepted {invalid:?}"
+        );
     }
 
     #[test]
@@ -346,9 +337,9 @@ mod tests {
         let maximum = format!("{}={}", "a".repeat(256), "v".repeat(255));
         assert_eq!(maximum.len(), 512);
         assert!(parse_tracestate([maximum.as_str()]).is_some());
-        let oversized = format!("{}={}", "a".repeat(256), "v".repeat(256));
-        assert_eq!(oversized.len(), 513);
-        assert!(parse_tracestate([oversized.as_str()]).is_none());
+        let beyond_minimum = format!("{}={}", "a".repeat(256), "v".repeat(256));
+        assert_eq!(beyond_minimum.len(), 513);
+        assert!(parse_tracestate([beyond_minimum.as_str()]).is_some());
 
         let thirty_two = (0..32)
             .map(|index| format!("k{index}=v"))

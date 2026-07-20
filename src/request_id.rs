@@ -32,6 +32,10 @@ impl RequestId {
         Ok(Self(value.into()))
     }
 
+    pub(crate) fn from_native_header(value: &str) -> Option<Self> {
+        (!value.is_empty()).then(|| Self(value.into()))
+    }
+
     /// Returns the validated identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {

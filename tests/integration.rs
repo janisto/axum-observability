@@ -24,11 +24,12 @@ use axum::{
     routing::get,
 };
 use axum_observability::{
-    FieldConvention, GcpProfileVersion, MissingRequestContext, ObservabilityConfig,
-    ObservabilityLayer, OperationId, RequestContext, RequestId, TraceContextLevel,
+    AwsProfileVersion, AzureProfileVersion, FieldConvention, GcpProfileVersion,
+    MissingRequestContext, ObservabilityConfig, ObservabilityLayer, OperationId, RequestContext,
+    RequestId, TraceContextLevel,
 };
 use http_body::{Body as HttpBody, Frame};
-use serde_json::Value;
+use serde_json::{Value, json};
 #[cfg(feature = "peer-ip")]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower::{Layer, Service, ServiceExt};

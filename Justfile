@@ -99,4 +99,4 @@ qa: workflow-check fmt-check sort-check unused-dependencies lint test test-doc d
 
 [group('adversarial')]
 mutation *args:
-    cargo mutants {{ args }}
+    cargo mutants --all-features {{ args }}

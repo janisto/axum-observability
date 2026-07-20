@@ -189,25 +189,28 @@ The selected value is available from:
 - the configured response header, unless disabled.
 
 Configuration can change the request/response header name, disable the response
-header, narrow caller-input validation, or supply a fallible generator.
-Generated values use `RequestId`, making baseline validity explicit, and the
-custom validator is never applied to them. A generator is invoked exactly
-twice unless its first result succeeds before the package-owned fallback is
-used, and callback failure never produces an invalid ID or alters traffic.
+header, broaden or narrow caller-input validation within Axum's native text
+header boundary, or supply a fallible generator. A custom validator can admit
+nonempty punctuation-bearing or longer caller values such as `id:42`; generated
+values use `RequestId` and retain the baseline grammar. The custom validator is
+never applied to generated values. A generator is invoked exactly twice unless
+its first result succeeds before the package-owned fallback is used, and
+callback failure never produces an invalid ID or alters traffic.
 
 `traceparent` parsing rejects duplicates, uppercase hexadecimal, zero trace or
-parent IDs, invalid framing and flags, and oversized input. Version `00` must
-use its exact framing. Versions `01` through `fe` validate the known prefix and
-treat a delimiter plus any remaining extension bytes as opaque, including a
-trailing delimiter.
+parent IDs, invalid framing and flags, and unsafe native field content. Version
+`00` must use its exact framing. Versions `01` through `fe` validate the known
+prefix and treat a delimiter plus any remaining extension bytes as opaque,
+including a trailing delimiter, without a package-invented length ceiling.
 W3C Trace Context Level 1 is the default; select `TraceContextLevel::Level2`
 explicitly when Level 2 key grammar and version-`00` random trace-ID flag
 projection are required. Higher versions preserve sampling without assigning
-meaning to the random bit. Repeated `tracestate` values are combined in wire order and accepted
-only when their selected-level grammar, unique-key rule, 32-member limit, and
-512-byte limit pass. Empty members are retained and count toward the member
-limit. An invalid `tracestate` is discarded without invalidating a valid
-`traceparent`.
+meaning to the random bit. Repeated `tracestate` values are combined in wire
+order and accepted only when their selected-level grammar, unique-key rule, and
+32-member limit pass. The crate can propagate at least 512 characters and
+admits a valid 513-character value; 512 is not a package rejection ceiling.
+Empty members are retained and count toward the member limit. An invalid
+`tracestate` is discarded without invalidating a valid `traceparent`.
 
 With valid trace context, `correlation_id` is the trace ID; otherwise it is the
 request ID. The incoming parent ID belongs to the caller. The crate does not
@@ -307,10 +310,17 @@ existing layer.
   `logging.googleapis.com/spanId`. Selecting `Gcp` resolves to the newest GCP
   profile implemented by the installed crate, currently `0.1.0`; use
   `with_gcp_profile_version(GcpProfileVersion::V0_1_0)` for an exact pin.
-- `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. It does not create an X-Ray
-  segment or parse `X-Amzn-Trace-Id`.
-- `Azure` adds `operation_Id` and `operation_ParentId`. It does not initialize
-  an Azure SDK or parse legacy `Request-Id` headers.
+- `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. Selecting it resolves to
+  exact current profile `0.1.0`; use
+  `with_aws_profile_version(AwsProfileVersion::V0_1_0)` for an exact pin and
+  `aws_profile_version()` for introspection. Other dynamic pins fail to parse.
+  It does not create an X-Ray segment or parse `X-Amzn-Trace-Id`.
+- `Azure` adds `operation_Id` and `operation_ParentId`. Selecting it resolves
+  to exact current profile `0.1.0`; use
+  `with_azure_profile_version(AzureProfileVersion::V0_1_0)` for an exact pin and
+  `azure_profile_version()` for introspection. Other dynamic pins fail to
+  parse. It does not initialize an Azure SDK or parse legacy `Request-Id`
+  headers.
 
 Provider trace fields are omitted without valid W3C context and never change
 which request metadata is captured. They correlate logs; trace creation,
@@ -354,6 +364,8 @@ remain responsible for choosing and monitoring the output destination.
 | --- | --- | --- |
 | `with_field_convention` | `FieldConvention::Generic` | Select one provider field convention |
 | `with_gcp_profile_version` | latest supported GCP version | Select and pin an exact GCP profile version |
+| `with_aws_profile_version` | current AWS profile | Select and pin exact AWS profile `0.1.0` |
+| `with_azure_profile_version` | current Azure profile | Select and pin exact Azure profile `0.1.0` |
 | `with_trace_context_level` | `TraceContextLevel::Level1` | Select W3C Trace Context Level 1 or Level 2 |
 | `with_request_id_header` | `x-request-id` | Set the request and response correlation header |
 | `with_response_header` | `true` | Enable or disable response-header injection |
@@ -361,15 +373,16 @@ remain responsible for choosing and monitoring the output destination.
 | `with_peer_ip` | `false` | With the `peer-ip` feature, opt into trusted socket-peer capture |
 | `with_user_agent` | `false` | Opt into one unambiguous text User-Agent value |
 | `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked up to twice per replacement |
-| `with_request_id_validator` | accepts baseline | Narrow caller-provided IDs without weakening the baseline |
+| `with_request_id_validator` | accepts baseline | Broaden or narrow caller IDs within Axum's native text-header boundary |
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |
 | `with_access_enricher` | no extra fields | Add synchronous application-owned terminal fields |
 
-`gcp_profile_version()` and `trace_context_level()` expose the resolved
+`gcp_profile_version()`, `aws_profile_version()`,
+`azure_profile_version()`, and `trace_context_level()` expose resolved
 non-secret settings for diagnostics and conformance evidence. Unsupported
-dynamic GCP pins fail when parsed as `GcpProfileVersion`; no network lookup is
-performed.
+dynamic profile pins fail when parsed as their typed version; no network lookup
+is performed.
 
 Unknown options do not exist: configuration is compile-time checked. The header
 setter accepts a validated `http::HeaderName`; use `HeaderName::from_static` or
@@ -415,7 +428,7 @@ data, and secrets out of those values.
 | Timeout or recovered panic has the wrong status | Observability is inside response-producing middleware | Add `ObservabilityLayer` last so it wraps recovery and timeout layers |
 | `operation_id` is absent | A route middleware inserted it only on the consumed request | Return `Extension(OperationId)` on the response |
 | `peer_ip` is absent | The feature or runtime opt-in is disabled, or no `ConnectInfo<SocketAddr>` exists | Enable `peer-ip`, call `with_peer_ip(true)`, and provide a trusted peer extension |
-| Caller request ID is replaced | It is missing, duplicate, invalid, or rejected by custom policy | Send one URI-unreserved value of at most 128 bytes |
+| Caller request ID is replaced | It is missing, duplicate, invalid, or rejected by custom policy | Send one baseline value, or align the caller value with the configured validator |
 | GCP trace link is absent | `traceparent` is missing or invalid | Send one valid lowercase W3C `traceparent`; do not provide a project-qualified value |
 | Duplicate framework access lines | Another access logger remains enabled | Disable the competing access logger when this crate owns terminal records |
 
@@ -468,26 +481,32 @@ artificial assertions.
 
 ## References
 
-- [Axum middleware](https://docs.rs/axum/latest/axum/middleware/index.html)
+- [Axum middleware](https://docs.rs/axum/0.8/axum/middleware/index.html)
   documents middleware placement and ordering.
-- [`Extension`](https://docs.rs/axum/latest/axum/struct.Extension.html) and
-  [`IntoResponseParts`](https://docs.rs/axum/latest/axum/response/trait.IntoResponseParts.html)
+- [`Extension`](https://docs.rs/axum/0.8/axum/struct.Extension.html) and
+  [`IntoResponseParts`](https://docs.rs/axum/0.8/axum/response/trait.IntoResponseParts.html)
   document request and response extensions.
-- [`http-body::Body`](https://docs.rs/http-body/latest/http_body/trait.Body.html)
+- [`http-body::Body`](https://docs.rs/http-body/1/http_body/trait.Body.html)
   defines frame polling, EOF, and size-hint behavior.
-- [`tracing-subscriber::Layer`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/trait.Layer.html)
-  and [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+- [`tracing-subscriber::Layer`](https://docs.rs/tracing-subscriber/0.3.23/tracing_subscriber/layer/trait.Layer.html)
+  and [`EnvFilter`](https://docs.rs/tracing-subscriber/0.3.23/tracing_subscriber/filter/struct.EnvFilter.html)
   define formatter composition and filtering.
-- [W3C Trace Context](https://www.w3.org/TR/trace-context/) defines strict
-  `traceparent` and `tracestate` syntax and the caller-owned parent ID.
-- [Google Cloud trace and log integration](https://docs.cloud.google.com/trace/docs/trace-log-integration)
+- [W3C Trace Context Level 1 Recommendation](https://www.w3.org/TR/2021/REC-trace-context-1-20211123/)
+  defines the default `traceparent` and `tracestate` contract.
+- [W3C Trace Context Level 2 Candidate Recommendation Draft](https://www.w3.org/TR/2024/CRD-trace-context-2-20240328/)
+  defines the explicit Level 2 key grammar and random trace-ID flag.
+- [Google Cloud trace and log integration](https://cloud.google.com/trace/docs/trace-log-integration)
   documents the bare trace ID as the preferred trace field format.
-- [Google Cloud structured logging](https://docs.cloud.google.com/logging/docs/structured-logging)
+- [Google Cloud Trace release notes](https://cloud.google.com/trace/docs/release-notes)
+  record when the bare trace ID became the preferred form while the full
+  project resource name remained supported.
+- [Google Cloud structured logging](https://cloud.google.com/logging/docs/structured-logging)
   documents `severity`, `message`, `httpRequest`, and special trace fields.
-- [AWS X-Ray trace IDs](https://docs.aws.amazon.com/xray/latest/devguide/xray-api-sendingdata.html)
+- [AWS X-Ray trace IDs](https://docs.aws.amazon.com/xray/latest/devguide/xray-api-sendingdata.html#xray-api-traceids)
   documents conversion from W3C to `1-8hex-24hex` form.
 - [Azure Application Insights data model](https://learn.microsoft.com/en-us/azure/azure-monitor/app/data-model-complete)
-  documents operation correlation fields.
+  defines `operation_Id` as the root-operation identifier and
+  `operation_ParentId` as the immediate-parent identifier.
 
 ## License
 

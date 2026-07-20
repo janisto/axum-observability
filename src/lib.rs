@@ -128,6 +128,96 @@ impl std::fmt::Display for InvalidGcpProfileVersion {
 
 impl std::error::Error for InvalidGcpProfileVersion {}
 
+/// Version of the specification-defined AWS structured-stdout profile.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AwsProfileVersion(&'static str);
+
+impl AwsProfileVersion {
+    /// AWS structured-stdout profile `0.1.0`.
+    pub const V0_1_0: Self = Self("0.1.0");
+    /// Current AWS profile implemented by this crate.
+    pub const LATEST: Self = Self::V0_1_0;
+    /// Returns the exact profile version string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl Default for AwsProfileVersion {
+    fn default() -> Self {
+        Self::LATEST
+    }
+}
+impl std::fmt::Display for AwsProfileVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+impl std::str::FromStr for AwsProfileVersion {
+    type Err = InvalidAwsProfileVersion;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "0.1.0" => Ok(Self::V0_1_0),
+            _ => Err(InvalidAwsProfileVersion),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Error returned when parsing an unsupported AWS profile version.
+pub struct InvalidAwsProfileVersion;
+impl std::fmt::Display for InvalidAwsProfileVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("unsupported AWS profile version")
+    }
+}
+impl std::error::Error for InvalidAwsProfileVersion {}
+
+/// Version of the specification-defined Azure structured-stdout profile.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AzureProfileVersion(&'static str);
+
+impl AzureProfileVersion {
+    /// Azure structured-stdout profile `0.1.0`.
+    pub const V0_1_0: Self = Self("0.1.0");
+    /// Current Azure profile implemented by this crate.
+    pub const LATEST: Self = Self::V0_1_0;
+    /// Returns the exact profile version string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl Default for AzureProfileVersion {
+    fn default() -> Self {
+        Self::LATEST
+    }
+}
+impl std::fmt::Display for AzureProfileVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+impl std::str::FromStr for AzureProfileVersion {
+    type Err = InvalidAzureProfileVersion;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "0.1.0" => Ok(Self::V0_1_0),
+            _ => Err(InvalidAzureProfileVersion),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Error returned when parsing an unsupported Azure profile version.
+pub struct InvalidAzureProfileVersion;
+impl std::fmt::Display for InvalidAzureProfileVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("unsupported Azure profile version")
+    }
+}
+impl std::error::Error for InvalidAzureProfileVersion {}
+
 #[cfg(test)]
 mod tests {
     use super::{FieldConvention, GcpProfileVersion, TraceContextLevel};

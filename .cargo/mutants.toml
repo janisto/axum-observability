@@ -3,4 +3,7 @@ timeout_multiplier = 5.0
 exclude_re = [
   'replace <impl fmt::Debug for (JsonLayer<W>|ObservabilityConfig)>::fmt',
   'src/trace_context\.rs:.*replace \| with \^ in decode_hex_byte',
+  # An all-feature campaign cannot observe the capability-disabled constant
+  # fallback; the enabled peer-IP path remains fully mutated and tested.
+  'replace unavailable_peer_ip -> Option<String>',
 ]

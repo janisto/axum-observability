@@ -103,7 +103,8 @@ cargo check --locked --example aws
 The AWS convention keeps flat JSON. A valid W3C trace ID is also formatted as
 `xray_trace_id`, for example
 `1-4bf92f35-77b34da6a3ce929d0e0e4736`. The crate does not create X-Ray segments
-or parse `X-Amzn-Trace-Id`.
+or parse `X-Amzn-Trace-Id`. The exact current profile is `0.1.0`; selecting
+`Aws` resolves to it, and `AwsProfileVersion::V0_1_0` pins it.
 
 ## Azure
 
@@ -113,7 +114,8 @@ cargo check --locked --example azure
 
 The Azure convention maps valid W3C values to `operation_Id` and
 `operation_ParentId`. It does not initialize an Azure SDK or parse legacy
-`Request-Id` headers.
+`Request-Id` headers. The exact current profile is `0.1.0`; selecting `Azure`
+resolves to it, and `AzureProfileVersion::V0_1_0` pins it.
 
 ## Application logging
 

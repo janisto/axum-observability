@@ -1,4 +1,4 @@
-use std::{fmt, io, io::Write};
+use std::{fmt, io, io::Write, time::Duration};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -91,9 +91,11 @@ where
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
-        let access_record = visitor
-            .fields
-            .remove("obs.record")
+        let trusted_access_callsite = event.metadata().target() == "axum_observability::access"
+            && event.metadata().module_path() == Some("axum_observability::middleware");
+        let access_record = trusted_access_callsite
+            .then(|| visitor.fields.remove("obs.record"))
+            .flatten()
             .and_then(|value| value.as_str().map(str::to_owned))
             .and_then(|value| serde_json::from_str::<Value>(&value).ok());
 
@@ -250,14 +252,42 @@ fn merge_access_record(
         copy_as(output, &mut http_request, "status", "status");
         copy_as(output, &mut http_request, "peer_ip", "remoteIp");
         copy_as(output, &mut http_request, "user_agent", "userAgent");
-        if let Some(duration) = output.get("duration_ms").and_then(Value::as_f64) {
-            http_request.insert(
-                "latency".to_owned(),
-                json!(format!("{}s", duration / 1_000.0)),
-            );
+        if let Some(latency) = output.get("duration_ms").and_then(gcp_latency) {
+            http_request.insert("latency".to_owned(), Value::String(latency));
         }
         output.insert("httpRequest".to_owned(), Value::Object(http_request));
     }
+}
+
+fn gcp_latency(value: &Value) -> Option<String> {
+    const MAX_MILLISECONDS_EXCLUSIVE: u64 = 315_576_000_001_000;
+    const MAX_MILLISECONDS_EXCLUSIVE_F64: f64 = 315_576_000_001_000.0;
+    if let Some(milliseconds) = value.as_u64() {
+        if milliseconds >= MAX_MILLISECONDS_EXCLUSIVE {
+            return None;
+        }
+        let seconds = milliseconds / 1_000;
+        let nanos = (milliseconds % 1_000) * 1_000_000;
+        return Some(if nanos == 0 {
+            format!("{seconds}s")
+        } else {
+            let fraction = format!("{nanos:09}");
+            format!("{seconds}.{}s", fraction.trim_end_matches('0'))
+        });
+    }
+    let milliseconds = value.as_f64()?;
+    if !(0.0..MAX_MILLISECONDS_EXCLUSIVE_F64).contains(&milliseconds) {
+        return None;
+    }
+    let duration = Duration::try_from_secs_f64(milliseconds / 1_000.0).ok()?;
+    let seconds = duration.as_secs();
+    let nanos = u64::from(duration.subsec_nanos());
+    Some(if nanos == 0 {
+        format!("{seconds}s")
+    } else {
+        let fraction = format!("{nanos:09}");
+        format!("{seconds}.{}s", fraction.trim_end_matches('0'))
+    })
 }
 
 fn copy_as(
@@ -358,26 +388,7 @@ fn is_event_reserved(key: &str) -> bool {
     is_request_field(key)
         || matches!(
             key,
-            "timestamp"
-                | "level"
-                | "severity"
-                | "target"
-                | "method"
-                | "path"
-                | "path_template"
-                | "operation_id"
-                | "status"
-                | "duration_ms"
-                | "peer_ip"
-                | "user_agent"
-                | "terminal_reason"
-                | "httpRequest"
-                | "logging.googleapis.com/trace"
-                | "logging.googleapis.com/trace_sampled"
-                | "xray_trace_id"
-                | "operation_Id"
-                | "operation_ParentId"
-                | "obs.record"
+            "timestamp" | "level" | "severity" | "target" | "obs.record"
         )
 }
 
@@ -430,7 +441,8 @@ mod tests {
     use time::{OffsetDateTime, UtcOffset};
 
     use super::{
-        InternalFailure, format_timestamp, internal_diagnostic, merge_access_record, serialize_json,
+        InternalFailure, format_timestamp, gcp_latency, internal_diagnostic, merge_access_record,
+        serialize_json,
     };
     use crate::FieldConvention;
 
@@ -511,5 +523,31 @@ mod tests {
         merge_access_record(&mut output, record, FieldConvention::Gcp);
         assert_eq!(output["duration_ms"], json!(315_576_000_000_000_u64));
         assert_eq!(output["httpRequest"]["latency"], "315576000000s");
+    }
+
+    #[test]
+    fn gcp_latency_preserves_fractional_and_near_limit_precision() {
+        assert_eq!(gcp_latency(&json!(12.5)).as_deref(), Some("0.0125s"));
+        assert_eq!(
+            gcp_latency(&json!(315_576_000_000_999_u64)).as_deref(),
+            Some("315576000000.999s")
+        );
+        assert_eq!(gcp_latency(&json!(-1.0)), None);
+    }
+
+    #[test]
+    fn gcp_latency_omits_provider_overflow_without_zeroing_portable_duration() {
+        let mut output = Map::new();
+        let record = json!({
+            "method": "GET",
+            "duration_ms": 315_576_000_001_000_u64,
+            "enrichment": {}
+        })
+        .as_object()
+        .expect("object fixture")
+        .clone();
+        merge_access_record(&mut output, record, FieldConvention::Gcp);
+        assert_eq!(output["duration_ms"], json!(315_576_000_001_000_u64));
+        assert!(output["httpRequest"].get("latency").is_none());
     }
 }

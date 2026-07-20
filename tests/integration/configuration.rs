@@ -79,11 +79,66 @@ fn gcp_profile_resolution_uses_latest_and_clears_stale_state() {
     assert_eq!(generic.gcp_profile_version(), None);
 }
 
+#[test]
+fn aws_and_azure_profiles_resolve_current_exact_versions_and_clear_stale_state() {
+    let aws = ObservabilityConfig::default().with_field_convention(FieldConvention::Aws);
+    assert_eq!(aws.aws_profile_version(), Some(AwsProfileVersion::V0_1_0));
+    assert_eq!(AwsProfileVersion::LATEST.as_str(), "0.1.0");
+    assert_eq!(AwsProfileVersion::V0_1_0.to_string(), "0.1.0");
+    assert_eq!(
+        "0.1.0".parse::<AwsProfileVersion>(),
+        Ok(AwsProfileVersion::V0_1_0)
+    );
+    assert_eq!(
+        "0.2.0"
+            .parse::<AwsProfileVersion>()
+            .expect_err("unsupported AWS version")
+            .to_string(),
+        "unsupported AWS profile version"
+    );
+    let aws_pinned =
+        ObservabilityConfig::default().with_aws_profile_version(AwsProfileVersion::V0_1_0);
+    assert_eq!(
+        aws_pinned.aws_profile_version(),
+        Some(AwsProfileVersion::V0_1_0)
+    );
+
+    let azure = aws_pinned.with_field_convention(FieldConvention::Azure);
+    assert_eq!(azure.aws_profile_version(), None);
+    assert_eq!(
+        azure.azure_profile_version(),
+        Some(AzureProfileVersion::V0_1_0)
+    );
+    assert_eq!(AzureProfileVersion::LATEST.as_str(), "0.1.0");
+    assert_eq!(AzureProfileVersion::V0_1_0.to_string(), "0.1.0");
+    assert_eq!(
+        "0.1.0".parse::<AzureProfileVersion>(),
+        Ok(AzureProfileVersion::V0_1_0)
+    );
+    assert_eq!(
+        "0.2.0"
+            .parse::<AzureProfileVersion>()
+            .expect_err("unsupported Azure version")
+            .to_string(),
+        "unsupported Azure profile version"
+    );
+    let azure_pinned =
+        ObservabilityConfig::default().with_azure_profile_version(AzureProfileVersion::V0_1_0);
+    assert_eq!(
+        azure_pinned.azure_profile_version(),
+        Some(AzureProfileVersion::V0_1_0)
+    );
+
+    let generic = azure_pinned.with_field_convention(FieldConvention::Generic);
+    assert_eq!(generic.aws_profile_version(), None);
+    assert_eq!(generic.azure_profile_version(), None);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn custom_header_validator_and_response_header_configuration_are_effective() {
     let config = ObservabilityConfig::default()
         .with_request_id_header(HeaderName::from_static("x-correlation-id"))
-        .with_request_id_validator(|value| value.as_str().starts_with("custom-"))
+        .with_request_id_validator(|value| value.starts_with("custom-"))
         .with_request_id_generator(|| {
             Some(RequestId::parse("custom-generated").expect("valid generated ID"))
         });
@@ -166,7 +221,7 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
         .expect("request");
     request
         .extensions_mut()
-        .insert(OperationId::from_static("list-items"));
+        .insert(OperationId::from_static("list-items\nvariant"));
     let response = app.oneshot(request).await.expect("response");
     to_bytes(response.into_body(), 1_024).await.expect("body");
 
@@ -179,7 +234,7 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
     assert_eq!(record["status"], 200);
     assert_eq!(record["target"], "axum_observability::access");
     assert_eq!(record["request_id"], "real-request");
-    assert_eq!(record["operation_id"], "list-items");
+    assert_eq!(record["operation_id"], "list-items\nvariant");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -35,12 +35,22 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
                 )
             }),
         )
+        .route(
+            "/literal*star",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_literal_star")),
+                    StatusCode::OK,
+                )
+            }),
+        )
         .layer(ObservabilityLayer::new(config));
 
     for uri in [
         "/items/tenant-a",
         "/items/tenant-b",
         "/long/value",
+        "/literal*star",
         "/files/tenant-a/one",
         "/files/tenant-b/two",
         "/missing/private-value",
@@ -59,19 +69,21 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
     }
 
     let records = capture.records();
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), 7);
     for record in &records[0..2] {
         assert_eq!(record["path_template"], "/items/{item_id}");
         assert_eq!(record["operation_id"], "get_item");
     }
     assert_eq!(records[2]["path_template"], long_route);
     assert_eq!(records[2]["operation_id"], "get_long");
-    for record in &records[3..5] {
+    assert_eq!(records[3]["path_template"], "/literal*star");
+    assert_eq!(records[3]["operation_id"], "get_literal_star");
+    for record in &records[4..6] {
         assert_eq!(record["path_template"], "/files/{*path}");
         assert_eq!(record["operation_id"], "get_file");
     }
-    assert!(records[5].get("path_template").is_none());
-    assert!(records[5].get("operation_id").is_none());
+    assert!(records[6].get("path_template").is_none());
+    assert!(records[6].get("operation_id").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -475,7 +487,7 @@ async fn valid_encoded_paths_are_preserved_and_malformed_escapes_are_omitted() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ambiguous_or_non_text_user_agent_is_omitted() {
+async fn ambiguous_or_non_text_user_agent_is_omitted_but_htab_is_preserved() {
     let config = ObservabilityConfig::default().with_user_agent(true);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
@@ -523,10 +535,11 @@ async fn ambiguous_or_non_text_user_agent_is_omitted() {
     let records = capture.records();
     assert_eq!(records.len(), 4);
     assert!(
-        records
+        records[..3]
             .iter()
             .all(|record| record.get("user_agent").is_none())
     );
+    assert_eq!(records[3]["user_agent"], "agent/1\tforged");
 }
 
 #[tokio::test(flavor = "current_thread")]

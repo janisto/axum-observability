@@ -73,21 +73,51 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
     assert_eq!(record["error"], "controlled application error");
     assert_eq!(record["level"], "INFO");
     assert!(record.get("severity").is_none());
-    for reserved in [
-        "method",
-        "path",
-        "path_template",
-        "operation_id",
-        "status",
-        "duration_ms",
-        "peer_ip",
-        "user_agent",
-        "terminal_reason",
+    for (key, expected) in [
+        ("method", json!("POST")),
+        ("path", json!("/spoofed")),
+        ("path_template", json!("/{spoofed}")),
+        ("operation_id", json!("spoofed_operation")),
+        ("status", json!(599)),
+        ("duration_ms", json!(999)),
+        ("peer_ip", json!("203.0.113.9")),
+        ("user_agent", json!("spoofed-agent")),
+        ("terminal_reason", json!("service_error")),
     ] {
-        assert!(record.get(reserved).is_none(), "reserved field {reserved}");
+        assert_eq!(record[key], expected, "application field {key}");
     }
     assert!(record["timestamp"].is_string());
     assert!(record.get("request_id").is_none());
+}
+
+#[test]
+fn application_callsite_cannot_forge_an_access_payload() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let forged = serde_json::json!({
+        "method": "DELETE",
+        "status": 599,
+        "request_id": "forged-request"
+    })
+    .to_string();
+
+    tracing::event!(
+        target: "axum_observability::access",
+        tracing::Level::INFO,
+        "obs.record" = forged,
+        application_field = "preserved",
+        message = "ordinary application event"
+    );
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message"], "ordinary application event");
+    assert_eq!(records[0]["application_field"], "preserved");
+    assert!(records[0].get("method").is_none());
+    assert!(records[0].get("status").is_none());
+    assert!(records[0].get("request_id").is_none());
+    assert!(records[0].get("obs.record").is_none());
 }
 
 #[test]
@@ -306,5 +336,60 @@ async fn core_health_route_has_exact_portable_projection() {
             assert!(!serialized.contains("dependency check"));
             assert!(!serialized.contains("check_duration_ms"));
         }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aws_and_azure_profiles_project_application_and_access_trace_aliases() {
+    for (convention, trace_key, expected_trace) in [
+        (
+            FieldConvention::Aws,
+            "xray_trace_id",
+            "1-4bf92f35-77b34da6a3ce929d0e0e4736",
+        ),
+        (
+            FieldConvention::Azure,
+            "operation_Id",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        ),
+    ] {
+        let config = ObservabilityConfig::default().with_field_convention(convention);
+        let capture = Capture::default();
+        let _guard = subscriber(&config, capture.clone()).set_default();
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async {
+                    tracing::info!(component = "handler", "application event");
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .layer(ObservabilityLayer::new(config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(
+                        "traceparent",
+                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+
+        let records = capture.records();
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert_eq!(record[trace_key], expected_trace);
+            if convention == FieldConvention::Azure {
+                assert_eq!(record["operation_ParentId"], "00f067aa0ba902b7");
+            }
+        }
+        assert_eq!(records[0]["message"], "application event");
+        assert_eq!(records[0]["component"], "handler");
+        assert_eq!(records[1]["message"], "request completed");
     }
 }

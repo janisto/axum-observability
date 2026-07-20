@@ -28,13 +28,13 @@ use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::{
-    FieldConvention, GcpProfileVersion, JsonLayer, OperationId, RequestContext, RequestId,
-    TraceContext, TraceContextLevel,
+    AwsProfileVersion, AzureProfileVersion, FieldConvention, GcpProfileVersion, JsonLayer,
+    OperationId, RequestContext, RequestId, TraceContext, TraceContextLevel,
     trace_context::{parse_traceparent_with_level, parse_tracestate_with_level},
 };
 
 type Generator = Arc<dyn Fn() -> Option<RequestId> + Send + Sync>;
-type Validator = Arc<dyn Fn(&RequestId) -> bool + Send + Sync>;
+type Validator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type LevelMapper = Arc<dyn Fn(StatusCode) -> Level + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + Sync>;
@@ -49,6 +49,8 @@ type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + 
 pub struct ObservabilityConfig {
     pub(crate) field_convention: FieldConvention,
     gcp_profile_version: Option<GcpProfileVersion>,
+    aws_profile_version: Option<AwsProfileVersion>,
+    azure_profile_version: Option<AzureProfileVersion>,
     trace_context_level: TraceContextLevel,
     request_id_header: HeaderName,
     response_header: bool,
@@ -57,7 +59,7 @@ pub struct ObservabilityConfig {
     peer_ip: bool,
     user_agent: bool,
     generator: Generator,
-    validator: Validator,
+    validator: Option<Validator>,
     level_mapper: LevelMapper,
     clock: Clock,
     enricher: Enricher,
@@ -69,6 +71,8 @@ impl fmt::Debug for ObservabilityConfig {
         debug
             .field("field_convention", &self.field_convention)
             .field("gcp_profile_version", &self.gcp_profile_version)
+            .field("aws_profile_version", &self.aws_profile_version)
+            .field("azure_profile_version", &self.azure_profile_version)
             .field("trace_context_level", &self.trace_context_level)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
@@ -86,6 +90,8 @@ impl Default for ObservabilityConfig {
         Self {
             field_convention: FieldConvention::Generic,
             gcp_profile_version: None,
+            aws_profile_version: None,
+            azure_profile_version: None,
             trace_context_level: TraceContextLevel::Level1,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
@@ -94,7 +100,7 @@ impl Default for ObservabilityConfig {
             peer_ip: false,
             user_agent: false,
             generator: Arc::new(|| Some(random_request_id())),
-            validator: Arc::new(|_| true),
+            validator: None,
             level_mapper: Arc::new(default_level),
             clock: Arc::new(Instant::now),
             enricher: Arc::new(|_| BTreeMap::new()),
@@ -109,6 +115,10 @@ impl ObservabilityConfig {
         self.field_convention = convention;
         self.gcp_profile_version =
             (convention == FieldConvention::Gcp).then_some(GcpProfileVersion::LATEST);
+        self.aws_profile_version =
+            (convention == FieldConvention::Aws).then_some(AwsProfileVersion::LATEST);
+        self.azure_profile_version =
+            (convention == FieldConvention::Azure).then_some(AzureProfileVersion::LATEST);
         self
     }
 
@@ -120,6 +130,8 @@ impl ObservabilityConfig {
     pub fn with_gcp_profile_version(mut self, version: GcpProfileVersion) -> Self {
         self.field_convention = FieldConvention::Gcp;
         self.gcp_profile_version = Some(version);
+        self.aws_profile_version = None;
+        self.azure_profile_version = None;
         self
     }
 
@@ -127,6 +139,38 @@ impl ObservabilityConfig {
     #[must_use]
     pub const fn gcp_profile_version(&self) -> Option<GcpProfileVersion> {
         self.gcp_profile_version
+    }
+
+    /// Selects an exact supported AWS structured-stdout profile.
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_aws_profile_version(mut self, version: AwsProfileVersion) -> Self {
+        self.field_convention = FieldConvention::Aws;
+        self.gcp_profile_version = None;
+        self.aws_profile_version = Some(version);
+        self.azure_profile_version = None;
+        self
+    }
+
+    /// Returns the resolved AWS profile version, when selected.
+    #[must_use]
+    pub const fn aws_profile_version(&self) -> Option<AwsProfileVersion> {
+        self.aws_profile_version
+    }
+
+    /// Selects an exact supported Azure structured-stdout profile.
+    #[must_use = "configuration builders return a new value"]
+    pub fn with_azure_profile_version(mut self, version: AzureProfileVersion) -> Self {
+        self.field_convention = FieldConvention::Azure;
+        self.gcp_profile_version = None;
+        self.aws_profile_version = None;
+        self.azure_profile_version = Some(version);
+        self
+    }
+
+    /// Returns the resolved Azure profile version, when selected.
+    #[must_use]
+    pub const fn azure_profile_version(&self) -> Option<AzureProfileVersion> {
+        self.azure_profile_version
     }
 
     /// Selects the W3C Trace Context level used for inbound requests.
@@ -215,14 +259,14 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Adds a request ID validator that may narrow, but cannot weaken, the
-    /// baseline URI-unreserved policy.
+    /// Adds an application validator for one runtime-valid caller header.
+    /// Generated identifiers always retain the package's default grammar.
     #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_validator(
         mut self,
-        validator: impl Fn(&RequestId) -> bool + Send + Sync + 'static,
+        validator: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.validator = Arc::new(validator);
+        self.validator = Some(Arc::new(validator));
         self
     }
 
@@ -264,8 +308,11 @@ impl ObservabilityConfig {
         JsonLayer::from_convention(writer, self.field_convention)
     }
 
-    fn accepts_request_id(&self, value: &RequestId) -> bool {
-        catch_unwind(AssertUnwindSafe(|| (self.validator)(value))).unwrap_or(false)
+    fn accepts_request_id(&self, value: &str) -> bool {
+        self.validator.as_ref().map_or_else(
+            || RequestId::parse(value).is_ok(),
+            |validator| catch_unwind(AssertUnwindSafe(|| validator(value))).unwrap_or(false),
+        )
     }
 
     fn generate_request_id(&self) -> RequestId {
@@ -400,13 +447,11 @@ where
 
 fn select_request_id(headers: &mut HeaderMap, config: &ObservabilityConfig) -> RequestId {
     let mut values = headers.get_all(&config.request_id_header).iter();
-    let first = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| RequestId::parse(value).ok());
+    let first = values.next().and_then(|value| value.to_str().ok());
     let request_id = if values.next().is_none() {
         first
             .filter(|value| config.accepts_request_id(value))
+            .and_then(RequestId::from_native_header)
             .unwrap_or_else(|| config.generate_request_id())
     } else {
         config.generate_request_id()
@@ -543,57 +588,12 @@ fn canonical_raw_path(value: &str) -> Option<String> {
 }
 
 fn canonical_route_template(native: &str) -> Option<String> {
-    if !native.starts_with('/') || native.contains('?') || native.contains('#') {
-        return None;
-    }
-    let segments = native[1..].split('/').collect::<Vec<_>>();
-    let mut canonical = Vec::with_capacity(segments.len());
-    for (index, segment) in segments.iter().enumerate() {
-        if let Some(name) = segment
-            .strip_prefix("{*")
-            .and_then(|value| value.strip_suffix('}'))
-        {
-            if index != segments.len() - 1 || !is_route_parameter_name(name) {
-                return None;
-            }
-            canonical.push(*segment);
-        } else if let Some(name) = segment
-            .strip_prefix('{')
-            .and_then(|value| value.strip_suffix('}'))
-        {
-            if !is_route_parameter_name(name) {
-                return None;
-            }
-            canonical.push(*segment);
-        } else if segment.contains(['{', '}', '*']) {
-            return None;
-        } else {
-            canonical.push(*segment);
-        }
-    }
-    Some(format!("/{}", canonical.join("/")))
-}
-
-fn is_route_parameter_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.chars().any(|character| {
-            character.is_control() || matches!(character, '/' | '{' | '}' | '*' | '?' | '#')
-        })
+    (!native.is_empty()).then(|| native.to_owned())
 }
 
 #[cfg(test)]
 mod route_template_tests {
-    use super::{canonical_raw_path, canonical_route_template, is_route_parameter_name};
-
-    #[test]
-    fn route_parameter_names_enforce_only_shared_safety_constraints() {
-        for valid in ["a", "0item", "item-id", "item.name"] {
-            assert!(is_route_parameter_name(valid), "rejected {valid:?}");
-        }
-        for invalid in ["", "item/name", "item?", "item\n"] {
-            assert!(!is_route_parameter_name(invalid), "accepted {invalid:?}");
-        }
-    }
+    use super::{canonical_raw_path, canonical_route_template};
 
     #[test]
     fn canonical_raw_path_preserves_origin_form_and_rejects_unsafe_framing() {
@@ -614,7 +614,7 @@ mod route_template_tests {
     }
 
     #[test]
-    fn canonical_route_template_accepts_only_the_shared_axum_forms() {
+    fn canonical_route_template_preserves_nonempty_authoritative_matched_paths() {
         for (native, expected) in [
             ("/health".to_owned(), Some("/health".to_owned())),
             (
@@ -641,12 +641,8 @@ mod route_template_tests {
                 "/items/{item-id}".to_owned(),
                 Some("/items/{item-id}".to_owned()),
             ),
-            ("/items/{item?}".to_owned(), None),
-            ("/items/{item#}".to_owned(), None),
-            ("/files/{*path}/suffix".to_owned(), None),
-            ("health".to_owned(), None),
-            ("/health?secret".to_owned(), None),
-            ("/health#fragment".to_owned(), None),
+            ("/literal*star".to_owned(), Some("/literal*star".to_owned())),
+            (String::new(), None),
         ] {
             assert_eq!(canonical_route_template(&native), expected, "{native}");
         }
@@ -665,19 +661,17 @@ fn peer_ip(request: &Request<Body>, config: &ObservabilityConfig) -> Option<Stri
 }
 
 #[cfg(not(feature = "peer-ip"))]
-fn peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<String> {
+fn unavailable_peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<String> {
     None
 }
+
+#[cfg(not(feature = "peer-ip"))]
+use unavailable_peer_ip as peer_ip;
 
 fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let first = values.next()?.to_str().ok()?;
-    if values.next().is_some()
-        || first.is_empty()
-        || first
-            .chars()
-            .any(|character| character <= '\u{1f}' || character == '\u{7f}')
-    {
+    if values.next().is_some() || first.is_empty() {
         return None;
     }
     Some(first.to_owned())
@@ -844,10 +838,6 @@ enum DurationMilliseconds {
 }
 
 fn duration_milliseconds(duration: Duration) -> DurationMilliseconds {
-    const MAX_PROTOBUF_DURATION_SECONDS: u64 = 315_576_000_000;
-    if duration.as_secs() > MAX_PROTOBUF_DURATION_SECONDS {
-        return DurationMilliseconds::Integer(0);
-    }
     if duration.subsec_nanos().is_multiple_of(1_000_000) {
         DurationMilliseconds::Integer(duration.as_millis())
     } else {
@@ -864,14 +854,14 @@ mod duration_tests {
     use super::duration_milliseconds;
 
     #[test]
-    fn clamps_only_values_beyond_the_gcp_protobuf_duration_range() {
+    fn portable_duration_is_not_clamped_by_a_provider_projection_range() {
         let maximum = serde_json::to_value(duration_milliseconds(Duration::from_hours(87_660_000)))
             .expect("serialize maximum duration");
         let overflow =
             serde_json::to_value(duration_milliseconds(Duration::from_secs(315_576_000_001)))
                 .expect("serialize overflow duration");
         assert_eq!(maximum, json!(315_576_000_000_000_u64));
-        assert_eq!(overflow, json!(0));
+        assert_eq!(overflow, json!(315_576_000_001_000_u64));
     }
 }
 

@@ -16,9 +16,9 @@ The changes in this section target `2.0.0` and must not be published on the
 - Replace queries that depend on synthetic body/service `error` summaries with
   `terminal_reason`, status, and severity. Rich error text remains omitted by
   default to avoid disclosing application details.
-- Treat custom request-ID validators as caller-input narrowing only. Generated
-  IDs always satisfy the crate baseline grammar and are not passed to the
-  custom validator.
+- Custom request-ID validators apply only to caller input and may broaden it
+  within Axum's native text-header boundary. Generated IDs satisfy the crate
+  baseline grammar and are not passed to the custom validator.
 - Allow a fallible custom generator to run up to two times before the crate
   falls back. Generators with external side effects must therefore make those
   effects idempotent or avoid them.
@@ -30,9 +30,9 @@ The changes in this section target `2.0.0` and must not be published on the
 
 ### Added
 
-- Added the specification-defined GCP `0.1.0` profile version, newest-supported
-  resolution for `FieldConvention::Gcp`, exact typed pinning, and effective
-  version introspection without network lookup.
+- Added exact current `0.1.0` profiles for GCP, AWS, and Azure with convention
+  selection, exact typed pinning, and effective-version introspection without
+  network lookup.
 - Added typed W3C Trace Context Level 1/Level 2 configuration, with Level 1 as
   the default and Level 2 random trace-ID flag projection.
 
@@ -54,17 +54,20 @@ The changes in this section target `2.0.0` and must not be published on the
   and integer serialization for exact whole-millisecond durations.
 - Classified `response_dropped` as an abnormal `ERROR` outcome regardless of
   committed status or the normal-response status mapper.
-- Validate Axum `MatchedPath` parameter and terminal catch-all names before
-  emitting the already-canonical route template; unsafe forms are omitted.
-- Stop synthesizing fixed `error` summaries for body and service failures, and
-  prevent application events from occupying access-catalog field names.
+- Trust nonempty Axum `MatchedPath` as authoritative framework route metadata,
+  including literal-star static routes.
+- Stop synthesizing fixed `error` summaries for body and service failures.
+  Authenticate package access payloads by their internal callsite while
+  preserving ordinary application-owned fields with the same names.
 
 ### Fixed
 
-- Preserve framework-valid route capture names, including digit-leading,
-  hyphenated, and longer names; reject non-ASCII or control-bearing
-  `traceparent` fields; and safely fall back to zero when elapsed time exceeds
-  the GCP protobuf Duration range.
+- Preserve framework-valid route metadata, HTTP-safe opaque future
+  `traceparent` suffixes without an invented length cap, valid `tracestate`
+  beyond 512 characters, HTAB User-Agent values, custom-admitted request IDs,
+  and nonempty static operation IDs.
+- Preserve portable duration across conventions and omit only an
+  unrepresentable GCP latency projection.
 
 - Omit malformed percent-escaped raw paths instead of emitting them.
 - Preserve sampling while omitting the Level 2 random flag for unknown future
