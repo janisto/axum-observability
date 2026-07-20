@@ -38,7 +38,7 @@ pub use request_id::{InvalidRequestId, RequestId};
 /// W3C Trace Context level used for inbound validation and projection.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum TraceContextLevel {
-    /// W3C Trace Context Level 1. This is the compatibility default.
+    /// W3C Trace Context Level 1. This is the default.
     #[default]
     Level1,
     /// W3C Trace Context Level 2, including the random trace-ID flag.

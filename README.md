@@ -43,21 +43,20 @@ This is an independently maintained crate, not official Axum middleware.
 
 ## Requirements and installation
 
-The minimum supported Rust version is 1.97.0. Version 1.0.0 supports the Axum
+The minimum supported Rust version is 1.97.0. Version 2.0.0 supports the Axum
 0.8 release line, including Axum 0.8.0 with only its `matched-path` feature.
 
 ```toml
 [dependencies]
 axum = "0.8"
-axum-observability = "1.0.0"
+axum-observability = "2.0.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ```
 
-Version 1.0.0 stabilizes the API and structured-log contract introduced in
-0.3.0. Exported APIs, configuration defaults, structured fields, and supported
-Rust and Axum versions are compatibility contracts. Breaking changes require a
-new major version; minor and patch releases preserve documented behavior.
+Version 2.0.0 is the clean contract described by this checkout. Version 1
+remains available for applications that need its API, defaults, or structured
+fields; v2 provides no compatibility aliases for those surfaces.
 
 ## GCP setup
 
@@ -405,6 +404,8 @@ coverage, and migration guidance.
 
 The current Unreleased schema and callback changes are reserved for `2.0.0`;
 see the changelog migration section before upgrading a 1.x application.
+Version 2 exposes no v1 constructor aliases or compatibility shims. Build both
+the middleware and JSON formatter from one `ObservabilityConfig`.
 
 Development uses [just](https://github.com/casey/just). The normal gates are:
 

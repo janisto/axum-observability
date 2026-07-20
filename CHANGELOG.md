@@ -22,6 +22,10 @@ The changes in this section target `2.0.0` and must not be published on the
 - Allow a fallible custom generator to run up to two times before the crate
   falls back. Generators with external side effects must therefore make those
   effects idempotent or avoid them.
+- Replace `JsonLayer::new(writer, convention)` with
+  `ObservabilityConfig::json_layer(writer)`. Version 2 has no direct-constructor
+  compatibility shim, so middleware and formatter settings come from one
+  configuration value.
 
 ### Added
 
@@ -29,9 +33,14 @@ The changes in this section target `2.0.0` and must not be published on the
   resolution for `FieldConvention::Gcp`, exact typed pinning, and effective
   version introspection without network lookup.
 - Added typed W3C Trace Context Level 1/Level 2 configuration, with Level 1 as
-  the compatibility default and Level 2 random trace-ID flag projection.
+  the default and Level 2 random trace-ID flag projection.
 
 ### Changed
+
+- Removed the v1 direct JSON-layer constructor so v2 exposes one coherent
+  configuration path.
+- Set crate and lock metadata to `2.0.0` so Cargo validation cannot package the
+  breaking v2 surface under the v1 version.
 
 - Aligned the GCP health example and integration fixture with privacy-safe
   request metadata, the shared `1.0.0` fixture value, stable `health_check`

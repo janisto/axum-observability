@@ -9,6 +9,16 @@ use tracing_subscriber::{Layer, fmt::MakeWriter, layer::Context, registry::Looku
 use crate::FieldConvention;
 
 /// A composable newline-delimited JSON `tracing` layer.
+///
+/// Construct this layer through [`crate::ObservabilityConfig::json_layer`] so
+/// formatter and middleware configuration cannot drift. The v1 direct
+/// constructor is intentionally unavailable:
+///
+/// ```compile_fail
+/// use axum_observability::{FieldConvention, JsonLayer};
+///
+/// let _ = JsonLayer::new(std::io::sink(), FieldConvention::Generic);
+/// ```
 #[must_use]
 pub struct JsonLayer<W> {
     writer: W,
@@ -17,9 +27,7 @@ pub struct JsonLayer<W> {
 }
 
 impl<W> JsonLayer<W> {
-    /// Creates a JSON layer using the supplied writer and field convention.
-    #[must_use = "the JSON layer must be installed on a subscriber"]
-    pub const fn new(writer: W, field_convention: FieldConvention) -> Self {
+    pub(crate) const fn from_convention(writer: W, field_convention: FieldConvention) -> Self {
         Self {
             writer,
             field_convention,
@@ -450,10 +458,11 @@ mod tests {
         );
         assert!(!write.contains("request"));
 
-        let disabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic)
+        let disabled = crate::ObservabilityConfig::default()
+            .json_layer(std::io::sink())
             .log_internal_errors(false);
         assert!(!disabled.report_internal_failure(InternalFailure::Timestamp));
-        let enabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic);
+        let enabled = crate::ObservabilityConfig::default().json_layer(std::io::sink());
         assert!(enabled.report_internal_failure(InternalFailure::Timestamp));
     }
 

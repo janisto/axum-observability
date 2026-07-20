@@ -261,7 +261,7 @@ impl ObservabilityConfig {
     /// Creates a composable JSON layer using this configuration's field convention.
     #[must_use = "configuration builders return a new value"]
     pub fn json_layer<W>(&self, writer: W) -> JsonLayer<W> {
-        JsonLayer::new(writer, self.field_convention)
+        JsonLayer::from_convention(writer, self.field_convention)
     }
 
     fn accepts_request_id(&self, value: &RequestId) -> bool {
