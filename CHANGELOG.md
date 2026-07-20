@@ -41,6 +41,8 @@ The changes in this section target `2.0.0` and must not be published on the
   configuration path.
 - Set crate and lock metadata to `2.0.0` so Cargo validation cannot package the
   breaking v2 surface under the v1 version.
+- Documented LF-terminated NDJSON as the writer boundary and strengthened raw
+  framing coverage for independently parseable records.
 
 - Aligned the GCP health example and integration fixture with privacy-safe
   request metadata, the shared `1.0.0` fixture value, stable `health_check`

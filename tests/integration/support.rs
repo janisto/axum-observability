@@ -28,10 +28,13 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Capture {
 }
 
 impl Capture {
-    pub(super) fn records(&self) -> Vec<Value> {
+    pub(super) fn output(&self) -> String {
         let bytes = self.0.lock().expect("capture lock").clone();
-        String::from_utf8(bytes)
-            .expect("JSON is UTF-8")
+        String::from_utf8(bytes).expect("JSON is UTF-8")
+    }
+
+    pub(super) fn records(&self) -> Vec<Value> {
+        self.output()
             .lines()
             .map(|line| serde_json::from_str(line).expect("line is JSON"))
             .collect()

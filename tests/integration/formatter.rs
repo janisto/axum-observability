@@ -98,12 +98,18 @@ fn formatter_writes_each_ndjson_event_once() {
         .with(config.json_layer(capture.clone()))
         .set_default();
 
-    tracing::info!(answer = 42_u64, ready = true, "buffered event");
+    tracing::info!(answer = 42_u64, ready = true, "buffered\nevent");
 
     assert_eq!(capture.writes.load(Ordering::SeqCst), 1);
+    let output = capture.capture.output();
+    assert!(output.ends_with('\n'));
+    assert!(!output.contains('\r'));
+    let lines = output.strip_suffix('\n').expect("terminal LF").split('\n');
+    assert_eq!(lines.count(), 1, "embedded newlines must be JSON escaped");
     let records = capture.capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["message"], "buffered event");
+    assert!(records[0].is_object());
+    assert_eq!(records[0]["message"], "buffered\nevent");
     assert_eq!(records[0]["answer"], 42);
 }
 

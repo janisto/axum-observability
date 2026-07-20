@@ -10,6 +10,9 @@ use crate::FieldConvention;
 
 /// A composable newline-delimited JSON `tracing` layer.
 ///
+/// Each event is serialized as one compact JSON object followed by LF and
+/// passed to the configured writer as one complete buffer.
+///
 /// Construct this layer through [`crate::ObservabilityConfig::json_layer`] so
 /// formatter and middleware configuration cannot drift. The v1 direct
 /// constructor is intentionally unavailable:
