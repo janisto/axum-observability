@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+The changes in this section target `2.0.0` and must not be published on the
+`1.x` release line.
+
+### Migration from 1.x
+
+- Parse `trace_flags` as exactly two lowercase hexadecimal characters instead
+  of a JSON number. This preserves leading zeroes and the wire representation.
+- Replace queries that depend on synthetic body/service `error` summaries with
+  `terminal_reason`, status, and severity. Rich error text remains omitted by
+  default to avoid disclosing application details.
+- Treat custom request-ID validators as caller-input narrowing only. Generated
+  IDs always satisfy the crate baseline grammar and are not passed to the
+  custom validator.
+- Allow a fallible custom generator to run up to two times before the crate
+  falls back. Generators with external side effects must therefore make those
+  effects idempotent or avoid them.
+
 ### Added
 
 - Added the specification-defined GCP `0.1.0` profile version, newest-supported
@@ -32,6 +49,8 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - Omit malformed percent-escaped raw paths instead of emitting them.
+- Preserve sampling while omitting the Level 2 random flag for unknown future
+  `traceparent` versions.
 
 ## [1.0.0] - 2026-07-17
 

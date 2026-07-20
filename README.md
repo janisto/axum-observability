@@ -179,8 +179,9 @@ use its exact framing. Versions `01` through `fe` validate the known prefix and
 treat a delimiter plus any remaining extension bytes as opaque, including a
 trailing delimiter.
 W3C Trace Context Level 1 is the default; select `TraceContextLevel::Level2`
-explicitly when Level 2 key grammar and random trace-ID flag projection are
-required. Repeated `tracestate` values are combined in wire order and accepted
+explicitly when Level 2 key grammar and version-`00` random trace-ID flag
+projection are required. Higher versions preserve sampling without assigning
+meaning to the random bit. Repeated `tracestate` values are combined in wire order and accepted
 only when their selected-level grammar, unique-key rule, 32-member limit, and
 512-byte limit pass. Empty members are retained and count toward the member
 limit. An invalid `tracestate` is discarded without invalidating a valid
@@ -204,7 +205,7 @@ their display text.
 During a request, events inside the enabled package span also contain
 `request_id` and `correlation_id`. Valid W3C context adds `trace_id`,
 `parent_id`, `trace_flags`, and `trace_sampled`. Configured Level 2 additionally
-adds `trace_id_random`; Level 1 always omits it.
+adds `trace_id_random` for version `00`; Level 1 and higher versions omit it.
 
 The terminal record always has `message = "request completed"`. Its common
 semantic fields are:
@@ -401,6 +402,9 @@ public `ObservabilityService` is the nameable Tower service produced by
 defaults, structured fields, and supported runtime versions are compatibility
 contracts. Breaking changes require a new major version, explicit changelog
 coverage, and migration guidance.
+
+The current Unreleased schema and callback changes are reserved for `2.0.0`;
+see the changelog migration section before upgrading a 1.x application.
 
 Development uses [just](https://github.com/casey/just). The normal gates are:
 

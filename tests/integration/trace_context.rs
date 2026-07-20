@@ -92,7 +92,7 @@ async fn explicit_level_two_projects_random_flag_and_uses_level_two_tracestate_g
 
 #[tokio::test(flavor = "current_thread")]
 async fn future_traceparent_extension_is_accepted_but_never_logged() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default().with_trace_context_level(TraceContextLevel::Level2);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
@@ -103,7 +103,7 @@ async fn future_traceparent_extension_is_accepted_but_never_logged() {
         .header("x-request-id", "future-request")
         .header(
             "traceparent",
-            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-opaque-secret",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03-opaque-secret",
         )
         .body(Body::empty())
         .expect("request");
@@ -111,7 +111,13 @@ async fn future_traceparent_extension_is_accepted_but_never_logged() {
     let response = app.oneshot(request).await.expect("response");
     let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "future-request|4bf92f3577b34da6a3ce929d0e0e4736");
-    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    let records = capture.records();
+    for record in &records {
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert!(record.get("trace_id_random").is_none());
+    }
+    let output = serde_json::to_string(&records).expect("records serialize");
     assert!(!output.contains("opaque-secret"));
 }
 

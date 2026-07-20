@@ -39,8 +39,10 @@ pub(crate) fn parse_traceparent_with_level(
         return None;
     }
 
+    let version = decode_hex_byte(bytes[0], bytes[1]);
     let flags = decode_hex_byte(bytes[53], bytes[54]);
     Some(TraceContext::new(
+        version,
         value[3..35].to_owned(),
         value[36..52].to_owned(),
         flags,
@@ -200,6 +202,19 @@ mod tests {
         let not_random =
             parse_traceparent_with_level(VALID, TraceContextLevel::Level2).expect("flags 01");
         assert_eq!(not_random.trace_id_random(), Some(false));
+    }
+
+    #[test]
+    fn future_version_level_two_preserves_sampling_without_assigning_random() {
+        for (flags, sampled) in [("02", false), ("03", true)] {
+            let value =
+                format!("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-{flags}-opaque");
+            let trace = parse_traceparent_with_level(&value, TraceContextLevel::Level2)
+                .expect("future version");
+            assert_eq!(trace.sampled(), sampled);
+            assert_eq!(trace.trace_id_random(), None);
+            assert_eq!(trace.trace_context_level(), TraceContextLevel::Level2);
+        }
     }
 
     #[test]

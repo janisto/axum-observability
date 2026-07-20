@@ -10,6 +10,7 @@ use crate::{RequestId, TraceContextLevel};
 /// Validated inbound W3C trace context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceContext {
+    version: u8,
     trace_id: String,
     parent_id: String,
     flags: u8,
@@ -20,6 +21,7 @@ pub struct TraceContext {
 
 impl TraceContext {
     pub(crate) fn new(
+        version: u8,
         trace_id: String,
         parent_id: String,
         flags: u8,
@@ -27,6 +29,7 @@ impl TraceContext {
         traceparent: String,
     ) -> Self {
         Self {
+            version,
             trace_id,
             parent_id,
             flags,
@@ -77,9 +80,9 @@ impl TraceContext {
     /// `None` even when bit one is set.
     #[must_use]
     pub const fn trace_id_random(&self) -> Option<bool> {
-        match self.level {
-            TraceContextLevel::Level1 => None,
-            TraceContextLevel::Level2 => Some(self.flags & 2 == 2),
+        match (self.level, self.version) {
+            (TraceContextLevel::Level2, 0) => Some(self.flags & 2 == 2),
+            (TraceContextLevel::Level1 | TraceContextLevel::Level2, _) => None,
         }
     }
 
