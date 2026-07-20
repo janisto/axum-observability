@@ -24,8 +24,9 @@ The changes in this section target `2.0.0` and must not be published on the
   effects idempotent or avoid them.
 - Replace `JsonLayer::new(writer, convention)` with
   `ObservabilityConfig::json_layer(writer)`. Version 2 has no direct-constructor
-  compatibility shim, so middleware and formatter settings come from one
-  configuration value.
+  compatibility shim. Finalize one configuration before constructing the JSON
+  layer and middleware; the layer snapshots its convention and is not updated
+  by later builder calls.
 
 ### Added
 
@@ -37,8 +38,9 @@ The changes in this section target `2.0.0` and must not be published on the
 
 ### Changed
 
-- Removed the v1 direct JSON-layer constructor so v2 exposes one coherent
-  configuration path.
+- Removed the v1 direct JSON-layer constructor so v2 exposes one config-owned
+  JSON-layer construction path; callers must finalize and reuse the same
+  unchanged configuration for middleware coherence.
 - Set crate and lock metadata to `2.0.0` so Cargo validation cannot package the
   breaking v2 surface under the v1 version.
 - Documented LF-terminated NDJSON as the writer boundary and strengthened raw
@@ -58,6 +60,11 @@ The changes in this section target `2.0.0` and must not be published on the
   prevent application events from occupying access-catalog field names.
 
 ### Fixed
+
+- Preserve framework-valid route capture names, including digit-leading,
+  hyphenated, and longer names; reject non-ASCII or control-bearing
+  `traceparent` fields; and safely fall back to zero when elapsed time exceeds
+  the GCP protobuf Duration range.
 
 - Omit malformed percent-escaped raw paths instead of emitting them.
 - Preserve sampling while omitting the Level 2 random flag for unknown future

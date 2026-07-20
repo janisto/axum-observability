@@ -290,8 +290,11 @@ the selected route.
 
 ## Field conventions
 
-Select one convention on the shared `ObservabilityConfig`; `json_layer` and the
-terminal middleware then map the same captured semantic record.
+Select one convention on the shared `ObservabilityConfig`, finalize that value,
+then construct `json_layer` and the terminal middleware from the same unchanged
+configuration. `json_layer` snapshots the convention at construction time;
+later builder calls create a different configuration and do not update an
+existing layer.
 
 - `Generic` is the provider-neutral default and uses `level`.
 - `Gcp` replaces `level` with `severity`, adds

@@ -17,6 +17,7 @@ pub(crate) fn parse_traceparent_with_level(
 ) -> Option<TraceContext> {
     let bytes = value.as_bytes();
     if !(55..=512).contains(&bytes.len())
+        || bytes.iter().any(|byte| !(0x20..=0x7e).contains(byte))
         || bytes[2] != b'-'
         || bytes[35] != b'-'
         || bytes[52] != b'-'
@@ -256,17 +257,26 @@ mod tests {
             format!("{future}-"),
             format!("{future}-vendor"),
             format!("{future}-vendor space"),
-            format!("{future}-opaque-ümlaut"),
+            format!("{future}-~"),
         ] {
             assert!(parse_traceparent(&value).is_some(), "rejected {value:?}");
         }
     }
 
     #[test]
-    fn enforces_future_version_limit_in_utf8_bytes() {
+    fn enforces_printable_ascii_and_the_future_version_wire_boundary() {
         let future = VALID.replacen("00-", "01-", 1);
-        let maximum = format!("{future}-{}", "é".repeat(228));
-        assert_eq!(maximum.chars().count(), 284);
+        for invalid in [
+            format!("{future}-opaque-ümlaut"),
+            format!("{future}-opaque\u{1f}"),
+            format!("{future}-opaque\u{7f}"),
+        ] {
+            assert!(
+                parse_traceparent(&invalid).is_none(),
+                "accepted {invalid:?}"
+            );
+        }
+        let maximum = format!("{future}-{}", "x".repeat(456));
         assert_eq!(maximum.len(), 512);
         assert!(parse_traceparent(&maximum).is_some());
         let oversized = format!("{maximum}x");

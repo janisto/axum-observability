@@ -13,9 +13,11 @@ use crate::FieldConvention;
 /// Each event is serialized as one compact JSON object followed by LF and
 /// passed to the configured writer as one complete buffer.
 ///
-/// Construct this layer through [`crate::ObservabilityConfig::json_layer`] so
-/// formatter and middleware configuration cannot drift. The v1 direct
-/// constructor is intentionally unavailable:
+/// Construct this layer through [`crate::ObservabilityConfig::json_layer`]
+/// after finalizing the configuration, then use that same unchanged value for
+/// the middleware. The layer snapshots the field convention when constructed;
+/// later builder calls create a different configuration and do not update it.
+/// The v1 direct constructor is intentionally unavailable:
 ///
 /// ```compile_fail
 /// use axum_observability::{FieldConvention, JsonLayer};
@@ -424,9 +426,13 @@ impl Visit for JsonVisitor {
 #[cfg(test)]
 mod tests {
     use serde::{Serialize, Serializer};
+    use serde_json::{Map, json};
     use time::{OffsetDateTime, UtcOffset};
 
-    use super::{InternalFailure, format_timestamp, internal_diagnostic, serialize_json};
+    use super::{
+        InternalFailure, format_timestamp, internal_diagnostic, merge_access_record, serialize_json,
+    };
+    use crate::FieldConvention;
 
     struct SerializationFailure;
 
@@ -489,5 +495,21 @@ mod tests {
         let diagnostic = internal_diagnostic(true, InternalFailure::Serialization)
             .expect("serialization diagnostic");
         assert!(!diagnostic.contains("secret serialization detail"));
+    }
+
+    #[test]
+    fn gcp_latency_formats_the_maximum_protobuf_duration_without_precision_loss() {
+        let mut output = Map::new();
+        let record = json!({
+            "method": "GET",
+            "duration_ms": 315_576_000_000_000_u64,
+            "enrichment": {}
+        })
+        .as_object()
+        .expect("object fixture")
+        .clone();
+        merge_access_record(&mut output, record, FieldConvention::Gcp);
+        assert_eq!(output["duration_ms"], json!(315_576_000_000_000_u64));
+        assert_eq!(output["httpRequest"]["latency"], "315576000000s");
     }
 }

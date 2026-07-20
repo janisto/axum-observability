@@ -575,21 +575,25 @@ fn canonical_route_template(native: &str) -> Option<String> {
 }
 
 fn is_route_parameter_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let Some(first) = bytes.first() else {
-        return false;
-    };
-    if bytes.len() > 64 || !first.is_ascii_alphabetic() && *first != b'_' {
-        return false;
-    }
-    bytes[1..]
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    !name.is_empty()
+        && !name.chars().any(|character| {
+            character.is_control() || matches!(character, '/' | '{' | '}' | '*' | '?' | '#')
+        })
 }
 
 #[cfg(test)]
 mod route_template_tests {
-    use super::{canonical_raw_path, canonical_route_template};
+    use super::{canonical_raw_path, canonical_route_template, is_route_parameter_name};
+
+    #[test]
+    fn route_parameter_names_enforce_only_shared_safety_constraints() {
+        for valid in ["a", "0item", "item-id", "item.name"] {
+            assert!(is_route_parameter_name(valid), "rejected {valid:?}");
+        }
+        for invalid in ["", "item/name", "item?", "item\n"] {
+            assert!(!is_route_parameter_name(invalid), "accepted {invalid:?}");
+        }
+    }
 
     #[test]
     fn canonical_raw_path_preserves_origin_form_and_rejects_unsafe_framing() {
@@ -625,11 +629,21 @@ mod route_template_tests {
                 format!("/items/{{{}}}", "a".repeat(64)),
                 Some(format!("/items/{{{}}}", "a".repeat(64))),
             ),
-            (format!("/items/{{{}}}", "a".repeat(65)), None),
-            ("/items/{0item}".to_owned(), None),
-            ("/items/{item-id}".to_owned(), None),
+            (
+                format!("/items/{{{}}}", "a".repeat(65)),
+                Some(format!("/items/{{{}}}", "a".repeat(65))),
+            ),
+            (
+                "/items/{0item}".to_owned(),
+                Some("/items/{0item}".to_owned()),
+            ),
+            (
+                "/items/{item-id}".to_owned(),
+                Some("/items/{item-id}".to_owned()),
+            ),
+            ("/items/{item?}".to_owned(), None),
+            ("/items/{item#}".to_owned(), None),
             ("/files/{*path}/suffix".to_owned(), None),
-            ("/items/{item_id?}".to_owned(), None),
             ("health".to_owned(), None),
             ("/health?secret".to_owned(), None),
             ("/health#fragment".to_owned(), None),
@@ -830,10 +844,34 @@ enum DurationMilliseconds {
 }
 
 fn duration_milliseconds(duration: Duration) -> DurationMilliseconds {
+    const MAX_PROTOBUF_DURATION_SECONDS: u64 = 315_576_000_000;
+    if duration.as_secs() > MAX_PROTOBUF_DURATION_SECONDS {
+        return DurationMilliseconds::Integer(0);
+    }
     if duration.subsec_nanos().is_multiple_of(1_000_000) {
         DurationMilliseconds::Integer(duration.as_millis())
     } else {
         DurationMilliseconds::Fractional(duration.as_secs_f64() * 1_000.0)
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::duration_milliseconds;
+
+    #[test]
+    fn clamps_only_values_beyond_the_gcp_protobuf_duration_range() {
+        let maximum = serde_json::to_value(duration_milliseconds(Duration::from_hours(87_660_000)))
+            .expect("serialize maximum duration");
+        let overflow =
+            serde_json::to_value(duration_milliseconds(Duration::from_secs(315_576_000_001)))
+                .expect("serialize overflow duration");
+        assert_eq!(maximum, json!(315_576_000_000_000_u64));
+        assert_eq!(overflow, json!(0));
     }
 }
 

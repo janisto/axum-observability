@@ -5,6 +5,8 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
     let config = ObservabilityConfig::default();
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
+    let long_name = "a".repeat(65);
+    let long_route = format!("/long/{{{long_name}}}");
     let app = Router::new()
         .route(
             "/items/{item_id}",
@@ -24,11 +26,21 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
                 )
             }),
         )
+        .route(
+            &long_route,
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_long")),
+                    StatusCode::OK,
+                )
+            }),
+        )
         .layer(ObservabilityLayer::new(config));
 
     for uri in [
         "/items/tenant-a",
         "/items/tenant-b",
+        "/long/value",
         "/files/tenant-a/one",
         "/files/tenant-b/two",
         "/missing/private-value",
@@ -47,17 +59,19 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
     }
 
     let records = capture.records();
-    assert_eq!(records.len(), 5);
+    assert_eq!(records.len(), 6);
     for record in &records[0..2] {
         assert_eq!(record["path_template"], "/items/{item_id}");
         assert_eq!(record["operation_id"], "get_item");
     }
-    for record in &records[2..4] {
+    assert_eq!(records[2]["path_template"], long_route);
+    assert_eq!(records[2]["operation_id"], "get_long");
+    for record in &records[3..5] {
         assert_eq!(record["path_template"], "/files/{*path}");
         assert_eq!(record["operation_id"], "get_file");
     }
-    assert!(records[4].get("path_template").is_none());
-    assert!(records[4].get("operation_id").is_none());
+    assert!(records[5].get("path_template").is_none());
+    assert!(records[5].get("operation_id").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
