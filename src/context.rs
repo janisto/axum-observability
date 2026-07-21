@@ -15,7 +15,7 @@ pub struct TraceContext {
     parent_id: String,
     flags: u8,
     level: TraceContextLevel,
-    traceparent: String,
+    traceparent: Box<[u8]>,
     tracestate: Option<String>,
 }
 
@@ -26,7 +26,7 @@ impl TraceContext {
         parent_id: String,
         flags: u8,
         level: TraceContextLevel,
-        traceparent: String,
+        traceparent: Box<[u8]>,
     ) -> Self {
         Self {
             version,
@@ -86,10 +86,16 @@ impl TraceContext {
         }
     }
 
-    /// Accepted raw `traceparent` value.
+    /// Accepted raw `traceparent` bytes.
     #[must_use]
-    pub fn traceparent(&self) -> &str {
+    pub fn traceparent_bytes(&self) -> &[u8] {
         &self.traceparent
+    }
+
+    /// Accepted raw `traceparent` as UTF-8 when its opaque future suffix is text.
+    #[must_use]
+    pub fn traceparent(&self) -> Option<&str> {
+        std::str::from_utf8(&self.traceparent).ok()
     }
 
     /// Accepted combined `tracestate`, when valid.

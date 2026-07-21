@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::{
     AwsProfileVersion, AzureProfileVersion, FieldConvention, GcpProfileVersion, JsonLayer,
     OperationId, RequestContext, RequestId, TraceContext, TraceContextLevel,
+    request_id::native_field_content,
     trace_context::{parse_traceparent_with_level, parse_tracestate_with_level},
 };
 
@@ -391,11 +392,6 @@ where
         let span = request_span(&request_context);
         let started = catch_unwind(AssertUnwindSafe(|| (self.config.clock)()))
             .unwrap_or_else(|_| Instant::now());
-        let enrichment = catch_unwind(AssertUnwindSafe(|| {
-            (self.config.enricher)(&request_context)
-        }))
-        .unwrap_or_default();
-
         request.extensions_mut().insert(request_context.clone());
         let future = {
             let _entered = span.enter();
@@ -409,7 +405,6 @@ where
             started,
             config.clone(),
             guard_span,
-            enrichment,
         );
 
         Box::pin(
@@ -447,9 +442,12 @@ where
 
 fn select_request_id(headers: &mut HeaderMap, config: &ObservabilityConfig) -> RequestId {
     let mut values = headers.get_all(&config.request_id_header).iter();
-    let first = values.next().and_then(|value| value.to_str().ok());
+    let first = values
+        .next()
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok());
     let request_id = if values.next().is_none() {
         first
+            .filter(|value| native_field_content(value))
             .filter(|value| config.accepts_request_id(value))
             .and_then(RequestId::from_native_header)
             .unwrap_or_else(|| config.generate_request_id())
@@ -469,7 +467,7 @@ fn random_request_id() -> RequestId {
 
 fn select_trace_context(headers: &HeaderMap, level: TraceContextLevel) -> Option<TraceContext> {
     let mut parents = headers.get_all("traceparent").iter();
-    let first = parents.next()?.to_str().ok()?;
+    let first = parents.next()?.as_bytes();
     if parents.next().is_some() {
         return None;
     }
@@ -670,8 +668,8 @@ use unavailable_peer_ip as peer_ip;
 
 fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
     let mut values = headers.get_all(name).iter();
-    let first = values.next()?.to_str().ok()?;
-    if values.next().is_some() || first.is_empty() {
+    let first = std::str::from_utf8(values.next()?.as_bytes()).ok()?;
+    if values.next().is_some() || !native_field_content(first) {
         return None;
     }
     Some(first.to_owned())
@@ -717,7 +715,6 @@ struct TerminalState {
     status: Option<StatusCode>,
     config: ObservabilityConfig,
     span: Span,
-    enrichment: BTreeMap<String, Value>,
 }
 
 struct TerminalGuard {
@@ -750,7 +747,6 @@ impl TerminalGuard {
         started: Instant,
         config: ObservabilityConfig,
         span: Span,
-        enrichment: BTreeMap<String, Value>,
     ) -> Self {
         Self {
             state: Some(TerminalState {
@@ -760,7 +756,6 @@ impl TerminalGuard {
                 status: None,
                 config,
                 span,
-                enrichment,
             }),
         }
     }
@@ -789,11 +784,27 @@ impl TerminalGuard {
         let Some(state) = self.state.take() else {
             return;
         };
+        let mapped_level = |status| {
+            catch_unwind(AssertUnwindSafe(|| (state.config.level_mapper)(status)))
+                .unwrap_or_else(|_| default_level(status))
+        };
+        let level = match outcome {
+            TerminalOutcome::Completed => {
+                mapped_level(state.status.expect("completed response has a status"))
+            }
+            TerminalOutcome::ServiceError
+            | TerminalOutcome::BodyError
+            | TerminalOutcome::ResponseDropped => Level::ERROR,
+        };
         let finished =
             catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
         let duration = finished.saturating_duration_since(state.started);
         let trace = state.request_context.trace_context();
         let terminal_reason = outcome.terminal_reason();
+        let enrichment = catch_unwind(AssertUnwindSafe(|| {
+            (state.config.enricher)(&state.request_context)
+        }))
+        .unwrap_or_default();
         let record = AccessRecord {
             request_id: state.request_context.request_id().as_str().to_owned(),
             correlation_id: state.request_context.correlation_id().to_owned(),
@@ -811,19 +822,7 @@ impl TerminalGuard {
             peer_ip: state.metadata.peer_ip,
             user_agent: state.metadata.user_agent,
             terminal_reason: terminal_reason.map(str::to_owned),
-            enrichment: state.enrichment,
-        };
-        let mapped_level = |status| {
-            catch_unwind(AssertUnwindSafe(|| (state.config.level_mapper)(status)))
-                .unwrap_or_else(|_| default_level(status))
-        };
-        let level = match outcome {
-            TerminalOutcome::Completed => {
-                mapped_level(state.status.expect("completed response has a status"))
-            }
-            TerminalOutcome::ServiceError
-            | TerminalOutcome::BodyError
-            | TerminalOutcome::ResponseDropped => Level::ERROR,
+            enrichment,
         };
         let serialized = serde_json::to_string(&record).expect("access record is serializable");
         state.span.in_scope(|| emit_access(level, &serialized));

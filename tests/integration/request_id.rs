@@ -219,7 +219,13 @@ async fn generator_none_falls_back_and_validator_applies_only_to_caller_input() 
 
 #[tokio::test(flavor = "current_thread")]
 async fn custom_validator_may_admit_native_safe_values_beyond_default_grammar() {
-    for request_id in ["id:42".to_owned(), "a".repeat(129)] {
+    for request_id in [
+        "id:42".to_owned(),
+        "a".repeat(129),
+        "tenant request".to_owned(),
+        "tenant\trequest".to_owned(),
+        "tenant,request".to_owned(),
+    ] {
         let config = ObservabilityConfig::default().with_request_id_validator(|_| true);
         let capture = Capture::default();
         let _guard = subscriber(&config, capture).set_default();
@@ -243,4 +249,34 @@ async fn custom_validator_may_admit_native_safe_values_beyond_default_grammar() 
             request_id
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_validator_cannot_admit_edge_whitespace() {
+    let validator_calls = Arc::new(AtomicUsize::new(0));
+    for request_id in [" tenant", "tenant ", "\ttenant", "tenant\t"] {
+        let calls = validator_calls.clone();
+        let config = ObservabilityConfig::default()
+            .with_request_id_validator(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+            .with_request_id_generator(|| RequestId::parse("generated-edge").ok());
+        let app = Router::new()
+            .route("/", get(context_handler))
+            .layer(ObservabilityLayer::new(config));
+        let value = HeaderValue::from_bytes(request_id.as_bytes()).expect("native header value");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.headers()["x-request-id"], "generated-edge");
+    }
+    assert_eq!(validator_calls.load(Ordering::SeqCst), 0);
 }

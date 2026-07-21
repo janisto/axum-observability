@@ -15,13 +15,13 @@ fn formatter_debug_reports_policy_without_requiring_or_exposing_the_writer() {
 }
 
 #[test]
-fn unrelated_spans_cannot_spoof_request_correlation_fields() {
+fn external_callsite_cannot_spoof_the_package_request_span() {
     let config = ObservabilityConfig::default();
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let span = tracing::info_span!(
-        target: "application",
-        "application span",
+        target: "axum_observability::request",
+        "request",
         request_id = "span-spoofed",
         correlation_id = "correlation-spoofed",
         trace_id_random = true,
@@ -50,6 +50,13 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
         unsigned = 9_u64,
         ready = true,
         error = &error as &dyn std::error::Error,
+        request_id = "spoofed-request",
+        correlation_id = "spoofed-correlation",
+        trace_id = "00000000000000000000000000000001",
+        parent_id = "0000000000000001",
+        trace_flags = "ff",
+        trace_sampled = true,
+        trace_id_random = true,
         severity = "spoofed",
         method = "POST",
         path = "/spoofed",
@@ -60,6 +67,11 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
         peer_ip = "203.0.113.9",
         user_agent = "spoofed-agent",
         terminal_reason = "service_error",
+        "logging.googleapis.com/trace" = "spoofed-provider",
+        "logging.googleapis.com/future" = "spoofed-future-provider",
+        xray_trace_id = "spoofed-xray",
+        operation_Id = "spoofed-azure",
+        "obs.internal" = true,
         "background event"
     );
 
@@ -73,21 +85,35 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
     assert_eq!(record["error"], "controlled application error");
     assert_eq!(record["level"], "INFO");
     assert!(record.get("severity").is_none());
-    for (key, expected) in [
-        ("method", json!("POST")),
-        ("path", json!("/spoofed")),
-        ("path_template", json!("/{spoofed}")),
-        ("operation_id", json!("spoofed_operation")),
-        ("status", json!(599)),
-        ("duration_ms", json!(999)),
-        ("peer_ip", json!("203.0.113.9")),
-        ("user_agent", json!("spoofed-agent")),
-        ("terminal_reason", json!("service_error")),
+    for key in [
+        "method",
+        "request_id",
+        "correlation_id",
+        "trace_id",
+        "parent_id",
+        "trace_flags",
+        "trace_sampled",
+        "trace_id_random",
+        "path",
+        "path_template",
+        "operation_id",
+        "status",
+        "duration_ms",
+        "peer_ip",
+        "user_agent",
+        "terminal_reason",
+        "logging.googleapis.com/trace",
+        "logging.googleapis.com/future",
+        "xray_trace_id",
+        "operation_Id",
+        "obs.internal",
     ] {
-        assert_eq!(record[key], expected, "application field {key}");
+        assert!(
+            record.get(key).is_none(),
+            "reserved application field {key}"
+        );
     }
     assert!(record["timestamp"].is_string());
-    assert!(record.get("request_id").is_none());
 }
 
 #[test]
@@ -128,7 +154,7 @@ fn formatter_writes_each_ndjson_event_once() {
         .with(config.json_layer(capture.clone()))
         .set_default();
 
-    tracing::info!(answer = 42_u64, ready = true, "buffered\nevent");
+    tracing::info!(answer = 42_u64, ready = true, "buffered ✓\nevent");
 
     assert_eq!(capture.writes.load(Ordering::SeqCst), 1);
     let output = capture.capture.output();
@@ -139,8 +165,54 @@ fn formatter_writes_each_ndjson_event_once() {
     let records = capture.capture.records();
     assert_eq!(records.len(), 1);
     assert!(records[0].is_object());
-    assert_eq!(records[0]["message"], "buffered\nevent");
+    assert_eq!(records[0]["message"], "buffered ✓\nevent");
     assert_eq!(records[0]["answer"], 42);
+}
+
+#[test]
+fn concurrent_partial_writer_calls_remain_complete_and_unique() {
+    let config = ObservabilityConfig::default();
+    let capture = PartialCapture::default();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry().with(config.json_layer(capture.clone())),
+    );
+
+    let handles = (0_u64..8)
+        .map(|worker| {
+            let dispatch = dispatch.clone();
+            std::thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    for write in 0_u64..25 {
+                        tracing::info!(worker, write, "concurrent event");
+                    }
+                });
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().expect("formatter thread");
+    }
+
+    assert!(
+        capture.writes.load(Ordering::SeqCst) > 200,
+        "the adversarial writer must split records across write calls"
+    );
+    let output = capture.capture.output();
+    assert!(output.ends_with('\n'));
+    assert_eq!(output.lines().count(), 200);
+    let records = capture.capture.records();
+    assert_eq!(records.len(), 200);
+    let observed = records
+        .iter()
+        .map(|record| {
+            assert_eq!(record["message"], "concurrent event");
+            (
+                record["worker"].as_u64().expect("worker"),
+                record["write"].as_u64().expect("write"),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(observed.len(), 200);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -165,6 +237,31 @@ async fn immediate_writer_failure_does_not_change_the_http_result() {
         to_bytes(response.into_body(), 1_024).await.expect("body"),
         "ok"
     );
+    let state = writer.state.lock().expect("failing writer lock");
+    assert_eq!(state.calls, 1);
+    assert!(state.bytes.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn writer_failure_does_not_replace_the_original_service_error() {
+    let writer = FailingCapture {
+        state: Arc::new(Mutex::new(FailingWriterState::default())),
+        prefix_len: 0,
+    };
+    let config = ObservabilityConfig::default();
+    let layer = config.json_layer(writer.clone()).log_internal_errors(false);
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+    let service =
+        ObservabilityLayer::new(config).layer(tower::service_fn(|_request: Request<Body>| async {
+            Err::<Response<Body>, _>(io::Error::other("application sentinel"))
+        }));
+
+    let error = service
+        .oneshot(Request::new(Body::empty()))
+        .await
+        .expect_err("service must fail");
+
+    assert_eq!(error.to_string(), "application sentinel");
     let state = writer.state.lock().expect("failing writer lock");
     assert_eq!(state.calls, 1);
     assert!(state.bytes.is_empty());
@@ -241,7 +338,7 @@ async fn gcp_health_route_emits_correlated_application_and_terminal_records() {
     assert_eq!(terminal["operation_id"], "health_check");
     assert_eq!(terminal["httpRequest"]["requestMethod"], "GET");
     assert_eq!(terminal["httpRequest"]["status"], 200);
-    assert_eq!(terminal["httpRequest"]["latency"], "0.0125s");
+    assert_eq!(terminal["httpRequest"]["latency"], "0.012500s");
     assert!(terminal["httpRequest"]["status"].is_u64());
     for private in ["path", "peer_ip", "user_agent"] {
         assert!(terminal.get(private).is_none());
@@ -353,43 +450,54 @@ async fn aws_and_azure_profiles_project_application_and_access_trace_aliases() {
             "4bf92f3577b34da6a3ce929d0e0e4736",
         ),
     ] {
-        let config = ObservabilityConfig::default().with_field_convention(convention);
-        let capture = Capture::default();
-        let _guard = subscriber(&config, capture.clone()).set_default();
-        let app = Router::new()
-            .route(
-                "/",
-                get(|| async {
-                    tracing::info!(component = "handler", "application event");
-                    StatusCode::NO_CONTENT
-                }),
-            )
-            .layer(ObservabilityLayer::new(config));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header(
-                        "traceparent",
-                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-                    )
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        to_bytes(response.into_body(), 1_024).await.expect("body");
+        for (level, flags, random) in [
+            (TraceContextLevel::Level1, "01", None),
+            (TraceContextLevel::Level2, "03", Some(true)),
+        ] {
+            let config = ObservabilityConfig::default()
+                .with_field_convention(convention)
+                .with_trace_context_level(level);
+            let capture = Capture::default();
+            let _guard = subscriber(&config, capture.clone()).set_default();
+            let app = Router::new()
+                .route(
+                    "/",
+                    get(|| async {
+                        tracing::info!(component = "handler", "application event");
+                        StatusCode::NO_CONTENT
+                    }),
+                )
+                .layer(ObservabilityLayer::new(config));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .header(
+                            "traceparent",
+                            format!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-{flags}"),
+                        )
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            to_bytes(response.into_body(), 1_024).await.expect("body");
 
-        let records = capture.records();
-        assert_eq!(records.len(), 2);
-        for record in &records {
-            assert_eq!(record[trace_key], expected_trace);
-            if convention == FieldConvention::Azure {
-                assert_eq!(record["operation_ParentId"], "00f067aa0ba902b7");
+            let records = capture.records();
+            assert_eq!(records.len(), 2);
+            for record in &records {
+                assert_eq!(record[trace_key], expected_trace);
+                assert_eq!(
+                    record.get("trace_id_random").and_then(Value::as_bool),
+                    random
+                );
+                if convention == FieldConvention::Azure {
+                    assert_eq!(record["operation_ParentId"], "00f067aa0ba902b7");
+                }
             }
+            assert_eq!(records[0]["message"], "application event");
+            assert_eq!(records[0]["component"], "handler");
+            assert_eq!(records[1]["message"], "request completed");
         }
-        assert_eq!(records[0]["message"], "application event");
-        assert_eq!(records[0]["component"], "handler");
-        assert_eq!(records[1]["message"], "request completed");
     }
 }

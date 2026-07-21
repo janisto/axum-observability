@@ -44,7 +44,8 @@ NDJSON is deliberate for production logging:
   with bounded memory instead of waiting for a closing array bracket.
 - Append-only output needs no array brackets, commas, whole-file rewrites, or
   trailing-comma coordination. Each event is submitted as one complete encoded
-  line; the destination and record size determine OS-level write atomicity.
+  line. `JsonLayer` serializes writer creation and all partial writes for one
+  record, so concurrent events through the same layer cannot interleave.
 - A crash or interrupted final write can damage the incomplete last line, while
   previously completed lines remain independently parseable.
 - Analytics systems can split large inputs on newline boundaries and process
@@ -108,7 +109,8 @@ let app = Router::new()
 # let _: Router = app;
 ```
 
-`JsonLayer` writes one complete JSON object per line. Keep
+`JsonLayer` writes one complete JSON object per line and holds a record-level
+lock across the writer's full `write_all` operation. Keep
 `axum_observability::request=info` enabled in `RUST_LOG` when application events
 need correlation from the request span. Terminal access records carry their own
 validated correlation fields, so a surviving WARN or ERROR access event stays
@@ -191,7 +193,9 @@ The selected value is available from:
 Configuration can change the request/response header name, disable the response
 header, broaden or narrow caller-input validation within Axum's native text
 header boundary, or supply a fallible generator. A custom validator can admit
-nonempty punctuation-bearing or longer caller values such as `id:42`; generated
+broader RFC 9110 field content such as `id:42`, internal space or tab, and
+values longer than 128 bytes. Edge whitespace, controls, non-text bytes, and
+values Axum cannot re-emit exactly are rejected before the callback. Generated
 values use `RequestId` and retain the baseline grammar. The custom validator is
 never applied to generated values. A generator is invoked exactly twice unless
 its first result succeeds before the package-owned fallback is used, and
@@ -211,6 +215,13 @@ order and accepted only when their selected-level grammar, unique-key rule, and
 admits a valid 513-character value; 512 is not a package rejection ceiling.
 Empty members are retained and count toward the member limit. An invalid
 `tracestate` is discarded without invalidating a valid `traceparent`.
+
+The provider-neutral [`examples/basic.rs`](examples/basic.rs) uses
+`ObservabilityConfig::default()` for its Level 1 executable. To enable Level 2,
+follow `level_2_config()`, which calls
+`with_trace_context_level(TraceContextLevel::Level2)`. Its native example test
+sends flags `03` through both configurations and verifies that only Level 2
+emits `trace_id_random`.
 
 With valid trace context, `correlation_id` is the trace ID; otherwise it is the
 request ID. The incoming parent ID belongs to the caller. The crate does not
@@ -250,7 +261,7 @@ semantic fields are:
 | `status` | number | When a response status is known |
 | `duration_ms` | number | Always; non-negative handling and streaming time |
 | `peer_ip` | string | Only with the `peer-ip` feature, `with_peer_ip(true)`, and `ConnectInfo` |
-| `user_agent` | string | Only with `with_user_agent(true)` and one text header value |
+| `user_agent` | string | Only with `with_user_agent(true)` and one UTF-8 RFC 9110 field-content value |
 | `terminal_reason` | string | Only for `body_error`, `service_error`, or `response_dropped` |
 
 Optional values are omitted; the formatter does not emit `null` placeholders.

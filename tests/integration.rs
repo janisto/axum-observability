@@ -29,7 +29,7 @@ use axum_observability::{
     RequestId, TraceContextLevel,
 };
 use http_body::{Body as HttpBody, Frame};
-use serde_json::{Value, json};
+use serde_json::Value;
 #[cfg(feature = "peer-ip")]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower::{Layer, Service, ServiceExt};

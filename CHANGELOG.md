@@ -19,6 +19,9 @@ The changes in this section target `2.0.0` and must not be published on the
 - Custom request-ID validators apply only to caller input and may broaden it
   within Axum's native text-header boundary. Generated IDs satisfy the crate
   baseline grammar and are not passed to the custom validator.
+- Read accepted `TraceContext::traceparent()` values as optional UTF-8 and use
+  `traceparent_bytes()` when an opaque future-version suffix can contain raw
+  HTTP `obs-text`.
 - Allow a fallible custom generator to run up to two times before the crate
   falls back. Generators with external side effects must therefore make those
   effects idempotent or avoid them.
@@ -38,6 +41,8 @@ The changes in this section target `2.0.0` and must not be published on the
 
 ### Changed
 
+- Expanded the provider-neutral basic example with the Level 1 default, an
+  explicit Level 2 configuration path, and behavioral output tests.
 - Removed the v1 direct JSON-layer constructor so v2 exposes one config-owned
   JSON-layer construction path; callers must finalize and reuse the same
   unchanged configuration for middleware coherence.
@@ -57,15 +62,26 @@ The changes in this section target `2.0.0` and must not be published on the
 - Trust nonempty Axum `MatchedPath` as authoritative framework route metadata,
   including literal-star static routes.
 - Stop synthesizing fixed `error` summaries for body and service failures.
-  Authenticate package access payloads by their internal callsite while
-  preserving ordinary application-owned fields with the same names.
+  Authenticate package access payloads by their internal callsite, drop
+  reserved access-catalog fields from ordinary application events, and
+  preserve nonreserved application fields.
 
 ### Fixed
 
+- Serialize each complete formatter record across partial writer calls so
+  concurrent events cannot interleave, and authenticate request-span metadata
+  by the package callsite before accepting correlation fields.
+- Prevent application events from overriding reserved request, access,
+  envelope, and provider fields.
+- Emit GCP `httpRequest.latency` with canonical ProtoJSON fractional widths:
+  0, 3, 6, or 9 digits according to the required precision.
+- Apply the RFC 9110 field-content boundary before custom request-ID validation,
+  admitting internal space, tab, or a comma in one field-line; direct synthetic
+  edge-whitespace values remain a native safety check after real HTTP parsing.
 - Preserve framework-valid route metadata, HTTP-safe opaque future
-  `traceparent` suffixes without an invented length cap, valid `tracestate`
-  beyond 512 characters, HTAB User-Agent values, custom-admitted request IDs,
-  and nonempty static operation IDs.
+  `traceparent` suffixes—including raw `obs-text`—without an invented length
+  cap, valid `tracestate` beyond 512 characters, HTAB User-Agent values,
+  custom-admitted request IDs, and nonempty static operation IDs.
 - Preserve portable duration across conventions and omit only an
   unrepresentable GCP latency projection.
 

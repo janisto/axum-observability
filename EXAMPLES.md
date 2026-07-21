@@ -88,11 +88,16 @@ remain absent in this default example; GCP selection does not enable them.
 ## Provider-neutral JSON
 
 ```bash
-cargo check --locked --example basic
+cargo run --quiet --example basic
 ```
 
-The default convention writes `level` and generic correlation fields without
-provider-specific aliases.
+The executable uses `ObservabilityConfig::default()` and therefore runs Level
+1. To enable Level 2, follow `level_2_config()`, which adds
+`with_trace_context_level(TraceContextLevel::Level2)`. Both configurations feed
+the same router construction, and the native example test sends a version-`00`
+traceparent with flags `03` through both. The default convention writes `level`
+and generic correlation fields without provider-specific aliases; only Level 2
+emits `trace_id_random`.
 
 ## AWS
 

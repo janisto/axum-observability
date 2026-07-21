@@ -137,6 +137,44 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CountingCapture {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct PartialCapture {
+    pub(super) capture: Capture,
+    pub(super) writes: Arc<AtomicUsize>,
+}
+
+pub(super) struct PartialWriter {
+    capture: CaptureWriter,
+    writes: Arc<AtomicUsize>,
+}
+
+impl io::Write for PartialWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(byte) = bytes.first() else {
+            return Ok(0);
+        };
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.capture.write(std::slice::from_ref(byte))?;
+        std::thread::yield_now();
+        Ok(1)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.capture.flush()
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for PartialCapture {
+    type Writer = PartialWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        PartialWriter {
+            capture: CaptureWriter(self.capture.0.clone()),
+            writes: self.writes.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct FailingCapture {
     pub(super) state: Arc<Mutex<FailingWriterState>>,

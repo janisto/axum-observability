@@ -1,4 +1,4 @@
-use std::{fmt, io, io::Write, time::Duration};
+use std::{fmt, io, io::Write, sync::Mutex, time::Duration};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -29,6 +29,7 @@ pub struct JsonLayer<W> {
     writer: W,
     field_convention: FieldConvention,
     log_internal_errors: bool,
+    record_write_lock: Mutex<()>,
 }
 
 impl<W> JsonLayer<W> {
@@ -37,6 +38,7 @@ impl<W> JsonLayer<W> {
             writer,
             field_convention,
             log_internal_errors: true,
+            record_write_lock: Mutex::new(()),
         }
     }
 
@@ -77,7 +79,11 @@ where
         id: &tracing::span::Id,
         context: Context<'_, S>,
     ) {
-        if attributes.metadata().target() != "axum_observability::request" {
+        let metadata = attributes.metadata();
+        if metadata.target() != "axum_observability::request"
+            || metadata.module_path() != Some("axum_observability::middleware")
+            || metadata.name() != "request"
+        {
             return;
         }
         let mut visitor = JsonVisitor::default();
@@ -155,6 +161,10 @@ where
             }
         };
         line.push(b'\n');
+        let _record_guard = self
+            .record_write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut writer = self.writer.make_writer_for(event.metadata());
         if let Err(error) = writer.write_all(&line) {
             let _ = self.report_internal_failure(InternalFailure::Write(error.kind()));
@@ -268,12 +278,7 @@ fn gcp_latency(value: &Value) -> Option<String> {
         }
         let seconds = milliseconds / 1_000;
         let nanos = (milliseconds % 1_000) * 1_000_000;
-        return Some(if nanos == 0 {
-            format!("{seconds}s")
-        } else {
-            let fraction = format!("{nanos:09}");
-            format!("{seconds}.{}s", fraction.trim_end_matches('0'))
-        });
+        return Some(format_gcp_duration(seconds, nanos));
     }
     let milliseconds = value.as_f64()?;
     if !(0.0..MAX_MILLISECONDS_EXCLUSIVE_F64).contains(&milliseconds) {
@@ -282,12 +287,19 @@ fn gcp_latency(value: &Value) -> Option<String> {
     let duration = Duration::try_from_secs_f64(milliseconds / 1_000.0).ok()?;
     let seconds = duration.as_secs();
     let nanos = u64::from(duration.subsec_nanos());
-    Some(if nanos == 0 {
+    Some(format_gcp_duration(seconds, nanos))
+}
+
+fn format_gcp_duration(seconds: u64, nanos: u64) -> String {
+    if nanos == 0 {
         format!("{seconds}s")
+    } else if nanos.is_multiple_of(1_000_000) {
+        format!("{seconds}.{:03}s", nanos / 1_000_000)
+    } else if nanos.is_multiple_of(1_000) {
+        format!("{seconds}.{:06}s", nanos / 1_000)
     } else {
-        let fraction = format!("{nanos:09}");
-        format!("{seconds}.{}s", fraction.trim_end_matches('0'))
-    })
+        format!("{seconds}.{nanos:09}s")
+    }
 }
 
 fn copy_as(
@@ -356,7 +368,10 @@ fn is_request_field(key: &str) -> bool {
 }
 
 fn is_reserved(key: &str) -> bool {
-    is_request_field(key)
+    key.starts_with("logging.googleapis.com/")
+        || key.starts_with("obs.")
+        || key.starts_with("_obs_")
+        || is_request_field(key)
         || matches!(
             key,
             "timestamp"
@@ -371,12 +386,14 @@ fn is_reserved(key: &str) -> bool {
                 | "status"
                 | "duration_ms"
                 | "peer_ip"
+                | "remote_ip"
                 | "user_agent"
                 | "terminal_reason"
                 | "error"
                 | "httpRequest"
                 | "logging.googleapis.com/trace"
                 | "logging.googleapis.com/trace_sampled"
+                | "logging.googleapis.com/spanId"
                 | "xray_trace_id"
                 | "operation_Id"
                 | "operation_ParentId"
@@ -385,11 +402,7 @@ fn is_reserved(key: &str) -> bool {
 }
 
 fn is_event_reserved(key: &str) -> bool {
-    is_request_field(key)
-        || matches!(
-            key,
-            "timestamp" | "level" | "severity" | "target" | "obs.record"
-        )
+    key != "message" && key != "error" && is_reserved(key)
 }
 
 #[derive(Default)]
@@ -442,11 +455,28 @@ mod tests {
 
     use super::{
         InternalFailure, format_timestamp, gcp_latency, internal_diagnostic, merge_access_record,
-        serialize_json,
+        serialize_json, validated_trace_id,
     };
     use crate::FieldConvention;
 
     struct SerializationFailure;
+
+    #[test]
+    fn provider_trace_id_validation_requires_exact_lowercase_nonzero_hex() {
+        for trace_id in [
+            "short".to_owned(),
+            "g".repeat(32),
+            "0".repeat(32),
+            "A".repeat(32),
+        ] {
+            let output = Map::from_iter([("trace_id".to_owned(), json!(trace_id))]);
+            assert_eq!(validated_trace_id(&output), None);
+        }
+
+        let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let output = Map::from_iter([("trace_id".to_owned(), json!(trace_id))]);
+        assert_eq!(validated_trace_id(&output).as_deref(), Some(trace_id));
+    }
 
     impl Serialize for SerializationFailure {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
@@ -527,7 +557,9 @@ mod tests {
 
     #[test]
     fn gcp_latency_preserves_fractional_and_near_limit_precision() {
-        assert_eq!(gcp_latency(&json!(12.5)).as_deref(), Some("0.0125s"));
+        assert_eq!(gcp_latency(&json!(10)).as_deref(), Some("0.010s"));
+        assert_eq!(gcp_latency(&json!(12.5)).as_deref(), Some("0.012500s"));
+        assert_eq!(gcp_latency(&json!(1_500)).as_deref(), Some("1.500s"));
         assert_eq!(
             gcp_latency(&json!(315_576_000_000_999_u64)).as_deref(),
             Some("315576000000.999s")

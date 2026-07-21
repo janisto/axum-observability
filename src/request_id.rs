@@ -33,7 +33,7 @@ impl RequestId {
     }
 
     pub(crate) fn from_native_header(value: &str) -> Option<Self> {
-        (!value.is_empty()).then(|| Self(value.into()))
+        native_field_content(value).then(|| Self(value.into()))
     }
 
     /// Returns the validated identifier.
@@ -41,6 +41,19 @@ impl RequestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+pub(crate) fn native_field_content(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || matches!(bytes.first(), Some(b' ' | b'\t'))
+        || matches!(bytes.last(), Some(b' ' | b'\t'))
+    {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| *byte == b'\t' || *byte >= 0x20 && *byte != 0x7f)
 }
 
 impl AsRef<str> for RequestId {
@@ -136,7 +149,15 @@ fn validate(value: &str) -> Result<(), InvalidRequestId> {
 mod tests {
     use std::str::FromStr as _;
 
-    use super::{InvalidRequestId, RequestId};
+    use super::{InvalidRequestId, RequestId, native_field_content};
+
+    #[test]
+    fn native_field_content_admits_internal_htab_but_rejects_controls() {
+        assert!(native_field_content("tenant\trequest"));
+        for value in ["tenant\0request", "tenant\x1frequest", "tenant\x7frequest"] {
+            assert!(!native_field_content(value), "admitted {value:?}");
+        }
+    }
 
     #[test]
     fn accepts_exact_length_boundaries_and_conversion_forms() {

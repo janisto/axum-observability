@@ -12,10 +12,10 @@ pub(crate) fn parse_traceparent(value: &str) -> Option<TraceContext> {
 /// Parses one W3C `traceparent` value for the selected Trace Context level.
 #[must_use]
 pub(crate) fn parse_traceparent_with_level(
-    value: &str,
+    value: impl AsRef<[u8]>,
     level: TraceContextLevel,
 ) -> Option<TraceContext> {
-    let bytes = value.as_bytes();
+    let bytes = value.as_ref();
     if bytes.len() < 55
         || bytes
             .iter()
@@ -46,11 +46,11 @@ pub(crate) fn parse_traceparent_with_level(
     let flags = decode_hex_byte(bytes[53], bytes[54]);
     Some(TraceContext::new(
         version,
-        value[3..35].to_owned(),
-        value[36..52].to_owned(),
+        std::str::from_utf8(&bytes[3..35]).ok()?.to_owned(),
+        std::str::from_utf8(&bytes[36..52]).ok()?.to_owned(),
         flags,
         level,
-        value.to_owned(),
+        bytes.to_vec().into_boxed_slice(),
     ))
 }
 
@@ -187,13 +187,14 @@ mod tests {
         assert!(parsed.sampled());
         assert_eq!(parsed.trace_context_level(), TraceContextLevel::Level1);
         assert_eq!(parsed.trace_id_random(), None);
-        assert_eq!(parsed.traceparent(), VALID);
+        assert_eq!(parsed.traceparent(), Some(VALID));
+        assert_eq!(parsed.traceparent_bytes(), VALID.as_bytes());
     }
 
     #[test]
     fn level_two_projects_the_random_trace_id_flag() {
         let random =
-            parse_traceparent_with_level(&VALID.replace("-01", "-03"), TraceContextLevel::Level2)
+            parse_traceparent_with_level(VALID.replace("-01", "-03"), TraceContextLevel::Level2)
                 .expect("flags 03");
         assert_eq!(random.trace_context_level(), TraceContextLevel::Level2);
         assert_eq!(random.trace_id_random(), Some(true));
@@ -277,6 +278,13 @@ mod tests {
         assert!(long.len() > 512);
         assert!(parse_traceparent(&long).is_some());
         assert!(parse_traceparent(&format!("{future}-opaque-ümlaut")).is_some());
+
+        let mut obs_text = format!("{future}-opaque-").into_bytes();
+        obs_text.push(0x80);
+        let parsed = parse_traceparent_with_level(&obs_text, TraceContextLevel::Level1)
+            .expect("HTTP obs-text suffix remains opaque");
+        assert_eq!(parsed.traceparent_bytes(), obs_text);
+        assert_eq!(parsed.traceparent(), None);
     }
 
     #[test]
@@ -457,7 +465,7 @@ mod tests {
             prop_assert_eq!(parsed.parent_id(), parent_id.as_str());
             prop_assert_eq!(parsed.flags(), flags);
             prop_assert_eq!(parsed.sampled(), flags & 1 == 1);
-            prop_assert_eq!(parsed.traceparent(), value.as_str());
+            prop_assert_eq!(parsed.traceparent(), Some(value.as_str()));
         }
 
         #[test]

@@ -1,6 +1,31 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
+async fn extension_method_case_is_preserved_through_axum_and_writer() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NO_CONTENT })
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("m-SEARCH")
+                .uri("/search")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+
+    assert_eq!(capture.records()[0]["method"], "m-SEARCH");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
     let config = ObservabilityConfig::default();
     let capture = Capture::default();
@@ -246,7 +271,7 @@ async fn response_abandonment_adds_only_its_documented_terminal_field() {
 }
 
 #[test]
-fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
+fn external_invalid_trace_fields_do_not_enter_records_or_emit_aws_metadata() {
     let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Aws);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
@@ -267,8 +292,8 @@ fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
 
     let records = capture.records();
     assert_eq!(records.len(), invalid.len());
-    for (record, trace_id) in records.iter().zip(invalid) {
-        assert_eq!(record["trace_id"], trace_id);
+    for record in records {
+        assert!(record.get("trace_id").is_none());
         assert!(record.get("xray_trace_id").is_none());
     }
 }
@@ -522,6 +547,21 @@ async fn ambiguous_or_non_text_user_agent_is_omitted_but_htab_is_preserved() {
         .expect("request");
     app.clone().oneshot(empty).await.expect("response");
 
+    for value in [b" agent/1".as_slice(), b"agent/1 ".as_slice()] {
+        let edge_whitespace = Request::builder()
+            .uri("/")
+            .header(
+                "user-agent",
+                HeaderValue::from_bytes(value).expect("native header with edge whitespace"),
+            )
+            .body(Body::empty())
+            .expect("request");
+        app.clone()
+            .oneshot(edge_whitespace)
+            .await
+            .expect("response");
+    }
+
     let tab = Request::builder()
         .uri("/")
         .header(
@@ -533,13 +573,13 @@ async fn ambiguous_or_non_text_user_agent_is_omitted_but_htab_is_preserved() {
     app.oneshot(tab).await.expect("response");
 
     let records = capture.records();
-    assert_eq!(records.len(), 4);
+    assert_eq!(records.len(), 6);
     assert!(
-        records[..3]
+        records[..5]
             .iter()
             .all(|record| record.get("user_agent").is_none())
     );
-    assert_eq!(records[3]["user_agent"], "agent/1\tforged");
+    assert_eq!(records[5]["user_agent"], "agent/1\tforged");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -554,7 +594,7 @@ async fn enabled_single_text_user_agent_is_recorded() {
         .oneshot(
             Request::builder()
                 .uri("/")
-                .header("user-agent", "agent/1")
+                .header("user-agent", "agent/1 component/2")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -564,7 +604,7 @@ async fn enabled_single_text_user_agent_is_recorded() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["user_agent"], "agent/1");
+    assert_eq!(records[0]["user_agent"], "agent/1 component/2");
 }
 
 #[tokio::test(flavor = "current_thread")]
