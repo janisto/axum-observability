@@ -217,7 +217,11 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Enables or disables query-free raw path capture.
+    /// Enables or disables exact query-free raw path capture.
+    ///
+    /// Every nonempty path component exposed by
+    /// [`Uri::path`](axum::http::Uri::path) is retained without applying a
+    /// second path grammar.
     ///
     /// Enabling this can record identifying data and changes the application's
     /// privacy posture. Query strings are never captured.
@@ -248,9 +252,8 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Sets a fallible request ID generator. It is invoked up to twice per
-    /// replacement request before the crate falls back to a package-owned
-    /// random identifier.
+    /// Sets a fallible request ID generator. It is invoked once per replacement
+    /// request before the crate falls back to a package-owned random identifier.
     #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_generator(
         mut self,
@@ -317,13 +320,11 @@ impl ObservabilityConfig {
     }
 
     fn generate_request_id(&self) -> RequestId {
-        for _ in 0..2 {
-            if let Some(value) = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
-                .ok()
-                .flatten()
-            {
-                return value;
-            }
+        if let Some(value) = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
+            .ok()
+            .flatten()
+        {
+            return value;
         }
 
         random_request_id()
@@ -573,16 +574,7 @@ impl RequestMetadata {
 }
 
 fn canonical_raw_path(value: &str) -> Option<String> {
-    if !value.starts_with('/') || value.contains(['?', '#']) {
-        return None;
-    }
-    for suffix in value.split('%').skip(1) {
-        let bytes = suffix.as_bytes();
-        if bytes.len() < 2 || !bytes[0].is_ascii_hexdigit() || !bytes[1].is_ascii_hexdigit() {
-            return None;
-        }
-    }
-    Some(value.to_owned())
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn canonical_route_template(native: &str) -> Option<String> {
@@ -594,18 +586,18 @@ mod route_template_tests {
     use super::{canonical_raw_path, canonical_route_template};
 
     #[test]
-    fn canonical_raw_path_preserves_origin_form_and_rejects_unsafe_framing() {
+    fn canonical_raw_path_preserves_every_nonempty_native_path_component() {
         for (raw, expected) in [
             ("/", Some("/")),
             ("/objects/a%2Fb/%E2%9C%93", Some("/objects/a%2Fb/%E2%9C%93")),
-            ("objects/no-leading-slash", None),
-            ("/objects/query?secret", None),
-            ("/objects/fragment#secret", None),
-            ("/objects/bad%2", None),
-            ("/objects/bad%GG", None),
-            ("/objects/bad%2G", None),
-            ("/objects/bad%G2", None),
-            ("/a%20%G2", None),
+            ("objects/no-leading-slash", Some("objects/no-leading-slash")),
+            ("*", Some("*")),
+            ("/objects/bad%2", Some("/objects/bad%2")),
+            ("/objects/bad%GG", Some("/objects/bad%GG")),
+            ("/objects/bad%2G", Some("/objects/bad%2G")),
+            ("/objects/bad%G2", Some("/objects/bad%G2")),
+            ("/a%20%G2", Some("/a%20%G2")),
+            ("", None),
         ] {
             assert_eq!(canonical_raw_path(raw).as_deref(), expected, "{raw}");
         }

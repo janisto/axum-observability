@@ -116,7 +116,7 @@ where
 
         let mut output = Map::new();
         for (key, value) in visitor.fields {
-            if !is_event_reserved(&key) {
+            if !is_event_reserved(&key, self.field_convention) {
                 output.insert(key, value);
             }
         }
@@ -249,7 +249,7 @@ fn merge_access_record(
 
     if let Some(Value::Object(fields)) = enrichment {
         for (key, value) in fields {
-            if !is_reserved(&key) {
+            if !is_access_reserved(&key, convention) {
                 output.insert(key, value);
             }
         }
@@ -367,18 +367,29 @@ fn is_request_field(key: &str) -> bool {
     )
 }
 
-fn is_reserved(key: &str) -> bool {
-    key.starts_with("logging.googleapis.com/")
-        || key.starts_with("obs.")
-        || key.starts_with("_obs_")
-        || is_request_field(key)
+fn is_event_reserved(key: &str, convention: FieldConvention) -> bool {
+    is_request_field(key)
+        || matches!(key, "timestamp" | "target" | "obs.record")
+        || match convention {
+            FieldConvention::Generic => key == "level",
+            FieldConvention::Gcp => matches!(
+                key,
+                "severity"
+                    | "logging.googleapis.com/trace"
+                    | "logging.googleapis.com/trace_sampled"
+            ),
+            FieldConvention::Aws => matches!(key, "level" | "xray_trace_id"),
+            FieldConvention::Azure => {
+                matches!(key, "level" | "operation_Id" | "operation_ParentId")
+            }
+        }
+}
+
+fn is_access_reserved(key: &str, convention: FieldConvention) -> bool {
+    is_event_reserved(key, convention)
         || matches!(
             key,
-            "timestamp"
-                | "level"
-                | "severity"
-                | "target"
-                | "message"
+            "message"
                 | "method"
                 | "path"
                 | "path_template"
@@ -386,23 +397,11 @@ fn is_reserved(key: &str) -> bool {
                 | "status"
                 | "duration_ms"
                 | "peer_ip"
-                | "remote_ip"
                 | "user_agent"
                 | "terminal_reason"
                 | "error"
-                | "httpRequest"
-                | "logging.googleapis.com/trace"
-                | "logging.googleapis.com/trace_sampled"
-                | "logging.googleapis.com/spanId"
-                | "xray_trace_id"
-                | "operation_Id"
-                | "operation_ParentId"
-                | "obs.record"
         )
-}
-
-fn is_event_reserved(key: &str) -> bool {
-    key != "message" && key != "error" && is_reserved(key)
+        || convention == FieldConvention::Gcp && key == "httpRequest"
 }
 
 #[derive(Default)]

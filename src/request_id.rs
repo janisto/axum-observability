@@ -1,14 +1,19 @@
 use std::{error::Error, fmt, str::FromStr};
 
-/// A validated request identifier.
+/// A request identifier selected by the configured request-ID policy.
 ///
-/// Values contain between 1 and [`MAX_LEN`](Self::MAX_LEN) ASCII
-/// URI-unreserved bytes.
+/// Values created through [`parse`](Self::parse), [`FromStr`], or [`TryFrom`]
+/// satisfy the baseline grammar: 1 to [`MAX_LEN`](Self::MAX_LEN) ASCII
+/// URI-unreserved bytes. Middleware can also construct this type for one
+/// native-safe caller value admitted by a custom validator; such a value is not
+/// guaranteed to satisfy the baseline grammar.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(Box<str>);
 
 impl RequestId {
-    /// Maximum accepted request-ID length in bytes.
+    /// Maximum request-ID length accepted by the baseline parser, in bytes.
+    ///
+    /// A caller value admitted by a custom middleware validator can be longer.
     pub const MAX_LEN: usize = 128;
 
     /// Parses and validates a request identifier.

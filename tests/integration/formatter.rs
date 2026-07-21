@@ -65,13 +65,19 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
         status = 599_u64,
         duration_ms = 999_u64,
         peer_ip = "203.0.113.9",
+        remote_ip = "203.0.113.10",
         user_agent = "spoofed-agent",
         terminal_reason = "service_error",
+        httpRequest = "application-owned",
         "logging.googleapis.com/trace" = "spoofed-provider",
-        "logging.googleapis.com/future" = "spoofed-future-provider",
+        "logging.googleapis.com/trace_sampled" = false,
+        "logging.googleapis.com/future" = "application-data",
+        "logging.googleapis.com/spanId" = "application-span",
         xray_trace_id = "spoofed-xray",
         operation_Id = "spoofed-azure",
+        operation_ParentId = "spoofed-parent",
         "obs.internal" = true,
+        "_obs_future" = true,
         "background event"
     );
 
@@ -84,9 +90,8 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
     assert_eq!(record["ready"], true);
     assert_eq!(record["error"], "controlled application error");
     assert_eq!(record["level"], "INFO");
-    assert!(record.get("severity").is_none());
+    assert_eq!(record["severity"], "spoofed");
     for key in [
-        "method",
         "request_id",
         "correlation_id",
         "trace_id",
@@ -94,26 +99,220 @@ async fn formatter_preserves_typed_application_fields_and_background_events() {
         "trace_flags",
         "trace_sampled",
         "trace_id_random",
-        "path",
-        "path_template",
-        "operation_id",
-        "status",
-        "duration_ms",
-        "peer_ip",
-        "user_agent",
-        "terminal_reason",
-        "logging.googleapis.com/trace",
-        "logging.googleapis.com/future",
-        "xray_trace_id",
-        "operation_Id",
-        "obs.internal",
     ] {
         assert!(
             record.get(key).is_none(),
             "reserved application field {key}"
         );
     }
+    assert_eq!(record["method"], "POST");
+    assert_eq!(record["path"], "/spoofed");
+    assert_eq!(record["path_template"], "/{spoofed}");
+    assert_eq!(record["operation_id"], "spoofed_operation");
+    assert_eq!(record["status"], 599);
+    assert_eq!(record["duration_ms"], 999);
+    assert_eq!(record["peer_ip"], "203.0.113.9");
+    assert_eq!(record["remote_ip"], "203.0.113.10");
+    assert_eq!(record["user_agent"], "spoofed-agent");
+    assert_eq!(record["terminal_reason"], "service_error");
+    assert_eq!(record["httpRequest"], "application-owned");
+    assert_eq!(record["logging.googleapis.com/trace"], "spoofed-provider");
+    assert_eq!(record["logging.googleapis.com/trace_sampled"], false);
+    assert_eq!(record["xray_trace_id"], "spoofed-xray");
+    assert_eq!(record["operation_Id"], "spoofed-azure");
+    assert_eq!(record["operation_ParentId"], "spoofed-parent");
+    assert_eq!(record["logging.googleapis.com/future"], "application-data");
+    assert_eq!(record["logging.googleapis.com/spanId"], "application-span");
+    assert_eq!(record["obs.internal"], true);
+    assert_eq!(record["_obs_future"], true);
     assert!(record["timestamp"].is_string());
+}
+
+fn access_provider_aliases(_: &RequestContext) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("level".to_owned(), Value::String("access-level".to_owned())),
+        (
+            "severity".to_owned(),
+            Value::String("access-severity".to_owned()),
+        ),
+        (
+            "logging.googleapis.com/trace".to_owned(),
+            Value::String("access-gcp-trace".to_owned()),
+        ),
+        (
+            "logging.googleapis.com/trace_sampled".to_owned(),
+            Value::Bool(false),
+        ),
+        (
+            "xray_trace_id".to_owned(),
+            Value::String("access-xray".to_owned()),
+        ),
+        (
+            "operation_Id".to_owned(),
+            Value::String("access-azure-operation".to_owned()),
+        ),
+        (
+            "operation_ParentId".to_owned(),
+            Value::String("access-azure-parent".to_owned()),
+        ),
+        (
+            "httpRequest".to_owned(),
+            Value::String("access-http-request".to_owned()),
+        ),
+    ])
+}
+
+async fn application_provider_aliases() -> StatusCode {
+    tracing::info!(
+        level = "application-level",
+        severity = "application-severity",
+        "logging.googleapis.com/trace" = "application-gcp-trace",
+        "logging.googleapis.com/trace_sampled" = false,
+        xray_trace_id = "application-xray",
+        operation_Id = "application-azure-operation",
+        operation_ParentId = "application-azure-parent",
+        httpRequest = "application-http-request",
+        "application aliases"
+    );
+    StatusCode::NO_CONTENT
+}
+
+async fn provider_alias_records(convention: FieldConvention) -> (Vec<Value>, String) {
+    let config = ObservabilityConfig::default()
+        .with_field_convention(convention)
+        .with_access_enricher(access_provider_aliases);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(application_provider_aliases))
+        .layer(ObservabilityLayer::new(config));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    (capture.records(), capture.output())
+}
+
+fn assert_provider_alias_record(record: &Value, convention: FieldConvention, source: &str) {
+    match convention {
+        FieldConvention::Generic => {
+            assert_eq!(record["level"], "INFO");
+            assert_eq!(record["severity"], format!("{source}-severity"));
+            assert_eq!(
+                record["logging.googleapis.com/trace"],
+                format!("{source}-gcp-trace")
+            );
+            assert_eq!(record["logging.googleapis.com/trace_sampled"], false);
+            assert_eq!(record["xray_trace_id"], format!("{source}-xray"));
+            assert_eq!(record["operation_Id"], format!("{source}-azure-operation"));
+            assert_eq!(
+                record["operation_ParentId"],
+                format!("{source}-azure-parent")
+            );
+        }
+        FieldConvention::Gcp => {
+            assert_eq!(record["severity"], "INFO");
+            assert_eq!(record["level"], format!("{source}-level"));
+            assert!(record.get("logging.googleapis.com/trace").is_none());
+            assert!(record.get("logging.googleapis.com/trace_sampled").is_none());
+            assert_eq!(record["xray_trace_id"], format!("{source}-xray"));
+            assert_eq!(record["operation_Id"], format!("{source}-azure-operation"));
+            assert_eq!(
+                record["operation_ParentId"],
+                format!("{source}-azure-parent")
+            );
+        }
+        FieldConvention::Aws => {
+            assert_eq!(record["level"], "INFO");
+            assert_eq!(record["severity"], format!("{source}-severity"));
+            assert_eq!(
+                record["logging.googleapis.com/trace"],
+                format!("{source}-gcp-trace")
+            );
+            assert_eq!(record["logging.googleapis.com/trace_sampled"], false);
+            assert!(record.get("xray_trace_id").is_none());
+            assert_eq!(record["operation_Id"], format!("{source}-azure-operation"));
+            assert_eq!(
+                record["operation_ParentId"],
+                format!("{source}-azure-parent")
+            );
+        }
+        FieldConvention::Azure => {
+            assert_eq!(record["level"], "INFO");
+            assert_eq!(record["severity"], format!("{source}-severity"));
+            assert_eq!(
+                record["logging.googleapis.com/trace"],
+                format!("{source}-gcp-trace")
+            );
+            assert_eq!(record["logging.googleapis.com/trace_sampled"], false);
+            assert_eq!(record["xray_trace_id"], format!("{source}-xray"));
+            assert!(record.get("operation_Id").is_none());
+            assert!(record.get("operation_ParentId").is_none());
+        }
+        _ => panic!("unhandled field convention in collision test: {convention:?}"),
+    }
+}
+
+fn provider_alias_owned(convention: FieldConvention, key: &str) -> bool {
+    match convention {
+        FieldConvention::Generic => false,
+        FieldConvention::Gcp => matches!(
+            key,
+            "logging.googleapis.com/trace" | "logging.googleapis.com/trace_sampled"
+        ),
+        FieldConvention::Aws => key == "xray_trace_id",
+        FieldConvention::Azure => matches!(key, "operation_Id" | "operation_ParentId"),
+        _ => panic!("unhandled field convention in collision test: {convention:?}"),
+    }
+}
+
+fn assert_provider_alias_key_counts(output: &str, convention: FieldConvention) {
+    for line in output.lines() {
+        for key in ["level", "severity", "httpRequest"] {
+            assert_eq!(line.matches(&format!("\"{key}\"")).count(), 1, "{line}");
+        }
+        for key in [
+            "logging.googleapis.com/trace",
+            "logging.googleapis.com/trace_sampled",
+            "xray_trace_id",
+            "operation_Id",
+            "operation_ParentId",
+        ] {
+            assert_eq!(
+                line.matches(&format!("\"{key}\"")).count(),
+                usize::from(!provider_alias_owned(convention, key)),
+                "unexpected ownership for {key} in {convention:?}: {line}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn active_profile_protects_owned_aliases_and_retains_inactive_aliases() {
+    for convention in [
+        FieldConvention::Generic,
+        FieldConvention::Gcp,
+        FieldConvention::Aws,
+        FieldConvention::Azure,
+    ] {
+        let (records, output) = provider_alias_records(convention).await;
+        assert_eq!(records.len(), 2, "unexpected {convention:?} records");
+        assert_provider_alias_record(&records[0], convention, "application");
+        assert_provider_alias_record(&records[1], convention, "access");
+        assert_eq!(records[0]["httpRequest"], "application-http-request");
+        if convention == FieldConvention::Gcp {
+            assert_eq!(records[1]["httpRequest"]["requestMethod"], "GET");
+        } else {
+            assert_eq!(records[1]["httpRequest"], "access-http-request");
+        }
+        assert_provider_alias_key_counts(&output, convention);
+    }
 }
 
 #[test]

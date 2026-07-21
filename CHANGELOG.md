@@ -18,13 +18,14 @@ The changes in this section target `2.0.0` and must not be published on the
   default to avoid disclosing application details.
 - Custom request-ID validators apply only to caller input and may broaden it
   within Axum's native text-header boundary. Generated IDs satisfy the crate
-  baseline grammar and are not passed to the custom validator.
+  baseline grammar and are not passed to the custom validator. Replace a v1
+  `Fn(&RequestId) -> bool` callback with a v2 `Fn(&str) -> bool` callback; the
+  typed extractor represents the value selected by that configured policy.
 - Read accepted `TraceContext::traceparent()` values as optional UTF-8 and use
   `traceparent_bytes()` when an opaque future-version suffix can contain raw
   HTTP `obs-text`.
-- Allow a fallible custom generator to run up to two times before the crate
-  falls back. Generators with external side effects must therefore make those
-  effects idempotent or avoid them.
+- A fallible custom generator is invoked once before the crate-owned fallback,
+  so one replacement request cannot duplicate generator side effects.
 - Replace `JsonLayer::new(writer, convention)` with
   `ObservabilityConfig::json_layer(writer)`. Version 2 has no direct-constructor
   compatibility shim. Finalize one configuration before constructing the JSON
@@ -62,17 +63,19 @@ The changes in this section target `2.0.0` and must not be published on the
 - Trust nonempty Axum `MatchedPath` as authoritative framework route metadata,
   including literal-star static routes.
 - Stop synthesizing fixed `error` summaries for body and service failures.
-  Authenticate package access payloads by their internal callsite, drop
-  reserved access-catalog fields from ordinary application events, and
-  preserve nonreserved application fields.
+  Authenticate package access payloads by their internal callsite and preserve
+  ordinary application fields outside the exact package-owned set.
 
 ### Fixed
 
 - Serialize each complete formatter record across partial writer calls so
   concurrent events cannot interleave, and authenticate request-span metadata
   by the package callsite before accepting correlation fields.
-- Prevent application events from overriding reserved request, access,
-  envelope, and provider fields.
+- Protect exact package-owned fields contextually: application events can use
+  access-only fields, exact aliases owned only by an inactive provider profile,
+  and other non-owned provider-looking fields, while access enrichment cannot
+  replace exact terminal fields. Speculative namespace prefixes are no longer
+  reserved.
 - Emit GCP `httpRequest.latency` with canonical ProtoJSON fractional widths:
   0, 3, 6, or 9 digits according to the required precision.
 - Apply the RFC 9110 field-content boundary before custom request-ID validation,
@@ -85,7 +88,9 @@ The changes in this section target `2.0.0` and must not be published on the
 - Preserve portable duration across conventions and omit only an
   unrepresentable GCP latency projection.
 
-- Omit malformed percent-escaped raw paths instead of emitting them.
+- Preserve every nonempty query-free path component exposed by `http::Uri`,
+  including malformed percent forms and the asterisk form, without applying a
+  second adapter grammar.
 - Preserve sampling while omitting the Level 2 random flag for unknown future
   `traceparent` versions.
 

@@ -147,7 +147,7 @@ async fn replaces_duplicate_ids_and_invokes_the_generator_once() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generator_failure_is_retried_then_falls_back_without_applying_custom_validator() {
+async fn generator_failure_is_not_retried_and_falls_back_without_custom_validation() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default()
@@ -174,7 +174,7 @@ async fn generator_failure_is_retried_then_falls_back_without_applying_custom_va
         id.bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -242,11 +242,19 @@ async fn custom_validator_may_admit_native_safe_values_beyond_default_grammar() 
             )
             .await
             .expect("response");
+        let selected_header = response.headers()["x-request-id"]
+            .to_str()
+            .expect("request ID text")
+            .to_owned();
+        assert_eq!(selected_header, request_id);
+        let body = to_bytes(response.into_body(), 2_048)
+            .await
+            .expect("extractor response body");
+        let expected_body = format!("{request_id}|{request_id}");
         assert_eq!(
-            response.headers()["x-request-id"]
-                .to_str()
-                .expect("request ID text"),
-            request_id
+            body,
+            expected_body.as_bytes(),
+            "typed RequestContext must expose the custom-policy value"
         );
     }
 }

@@ -169,16 +169,18 @@ install recovery middleware inside `ObservabilityLayer` as shown.
 
 ## Request and trace context
 
-The default header is `X-Request-ID`. Exactly one incoming value is accepted
-when it contains 1-128 ASCII URI-unreserved characters: `A-Z`, `a-z`, `0-9`,
-`-`, `.`, `_`, and `~`. Missing, empty, duplicate, oversized, non-ASCII, or
-otherwise invalid values are replaced. The fallback is 128 random bits encoded
-as 32 lowercase hexadecimal characters.
+The default header is `X-Request-ID`. Under the default policy, exactly one
+incoming value is accepted when it contains 1-128 ASCII URI-unreserved
+characters: `A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, and `~`. Missing, empty,
+duplicate, oversized, non-ASCII, or otherwise invalid values are replaced. The
+fallback is 128 random bits encoded as 32 lowercase hexadecimal characters.
 
-Application configuration and tests can validate IDs through
+Application configuration and tests can validate the baseline grammar through
 `RequestId::parse`, `FromStr`, or `TryFrom`; invalid values return the public,
 non-sensitive `InvalidRequestId` error. `RequestId` has no unchecked public
-constructor.
+constructor. A `RequestId` extracted from middleware represents the value
+selected by the configured policy, so a custom validator can admit a typed
+value that does not pass the baseline parser.
 
 The selected value is available from:
 
@@ -197,9 +199,9 @@ broader RFC 9110 field content such as `id:42`, internal space or tab, and
 values longer than 128 bytes. Edge whitespace, controls, non-text bytes, and
 values Axum cannot re-emit exactly are rejected before the callback. Generated
 values use `RequestId` and retain the baseline grammar. The custom validator is
-never applied to generated values. A generator is invoked exactly twice unless
-its first result succeeds before the package-owned fallback is used, and
-callback failure never produces an invalid ID or alters traffic.
+never applied to generated values. A generator is invoked once before the
+package-owned fallback is used, and callback failure never produces an invalid
+ID or alters traffic.
 
 `traceparent` parsing rejects duplicates, uppercase hexadecimal, zero trace or
 parent IDs, invalid framing and flags, and unsafe native field content. Version
@@ -256,7 +258,7 @@ semantic fields are:
 | `trace_id_random` | boolean | Only with valid W3C context in configured Level 2 mode |
 | `method` | string | Always; HTTP method |
 | `path_template` | string | When Axum's `MatchedPath` is available |
-| `path` | string | Only with `with_raw_path(true)`; query-free concrete path |
+| `path` | string | Only with `with_raw_path(true)`; exact nonempty query-free `http::Uri` path, including `*` |
 | `operation_id` | string | When an `OperationId` request or response extension exists |
 | `status` | number | When a response status is known |
 | `duration_ms` | number | Always; non-negative handling and streaming time |
@@ -270,9 +272,13 @@ Normal completion omits `terminal_reason`; abnormal records do not invent an
 `ERROR` for every abnormal terminal reason or a normal 5xx, `WARN` for a
 normal 4xx, and `INFO` otherwise. The status-level mapper applies only to
 normal completion. Application events cannot replace package correlation,
-envelope, provider, or access-catalog fields. Access enrichment cannot replace
-terminal access fields either; package-owned fields win. Application `error`
-fields remain native application data and are not synthesized on access lines.
+envelope, selected-profile provider-alias, or internal-control fields.
+Access-only names, exact aliases owned only by an inactive provider profile,
+other unowned provider fields, and names that merely use an `obs.` or `_obs_`
+prefix remain ordinary application data. Access enrichment cannot replace exact
+terminal access fields; package-owned fields win without reserving speculative
+namespaces. Application `error` fields remain native application data and are
+not synthesized on access lines.
 
 `path_template` is the default low-cardinality aggregation key. Concrete `path`
 can have unbounded cardinality and may contain identifying data, so it is off by
@@ -383,7 +389,7 @@ remain responsible for choosing and monitoring the output destination.
 | `with_raw_path` | `false` | Opt into query-free concrete path capture |
 | `with_peer_ip` | `false` | With the `peer-ip` feature, opt into trusted socket-peer capture |
 | `with_user_agent` | `false` | Opt into one unambiguous text User-Agent value |
-| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked up to twice per replacement |
+| `with_request_id_generator` | random 128-bit ID | Supply a fallible typed generator, invoked once per replacement |
 | `with_request_id_validator` | accepts baseline | Broaden or narrow caller IDs within Axum's native text-header boundary |
 | `with_status_level_mapper` | 5xx/4xx/other mapping | Map final status to a `tracing::Level` |
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |

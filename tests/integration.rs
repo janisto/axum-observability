@@ -19,7 +19,7 @@ use axum::extract::ConnectInfo;
 use axum::{
     Extension, Router,
     body::{Body, Bytes, to_bytes},
-    http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode},
     response::IntoResponse,
     routing::get,
 };

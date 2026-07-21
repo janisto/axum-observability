@@ -204,6 +204,24 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
                 ("status".to_owned(), Value::from(999)),
                 ("target".to_owned(), Value::String("spoofed".to_owned())),
                 (
+                    "logging.googleapis.com/trace".to_owned(),
+                    Value::String("spoofed-provider".to_owned()),
+                ),
+                (
+                    "logging.googleapis.com/spanId".to_owned(),
+                    Value::String("application-span".to_owned()),
+                ),
+                (
+                    "logging.googleapis.com/labels".to_owned(),
+                    serde_json::json!({"component": "worker"}),
+                ),
+                ("obs.internal".to_owned(), Value::Bool(true)),
+                ("_obs_internal".to_owned(), Value::Bool(true)),
+                (
+                    "remote_ip".to_owned(),
+                    Value::String("203.0.113.10".to_owned()),
+                ),
+                (
                     "request_id".to_owned(),
                     Value::String(format!("spoofed-{}", context.request_id())),
                 ),
@@ -235,6 +253,15 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
     assert_eq!(record["target"], "axum_observability::access");
     assert_eq!(record["request_id"], "real-request");
     assert_eq!(record["operation_id"], "list-items\nvariant");
+    assert_eq!(record["logging.googleapis.com/trace"], "spoofed-provider");
+    assert_eq!(record["logging.googleapis.com/spanId"], "application-span");
+    assert_eq!(
+        record["logging.googleapis.com/labels"]["component"],
+        "worker"
+    );
+    assert_eq!(record["obs.internal"], true);
+    assert_eq!(record["_obs_internal"], true);
+    assert_eq!(record["remote_ip"], "203.0.113.10");
 }
 
 #[tokio::test(flavor = "current_thread")]

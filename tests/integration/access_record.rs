@@ -112,6 +112,54 @@ async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn native_route_language_supports_prefix_composite_but_not_optional_segments() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/reports/report-{year}",
+            get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route("/items/{item?}", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    for (uri, expected_status) in [
+        ("/reports/report-2026", StatusCode::NO_CONTENT),
+        ("/reports/report-2027", StatusCode::NO_CONTENT),
+        ("/reports/2026", StatusCode::NOT_FOUND),
+        ("/items/value", StatusCode::NO_CONTENT),
+        ("/items", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "unexpected GET {uri} status"
+        );
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 5);
+    for record in &records[..2] {
+        assert_eq!(record["path_template"], "/reports/report-{year}");
+    }
+    assert!(records[2].get("path_template").is_none());
+    assert_eq!(records[3]["path_template"], "/items/{item?}");
+    assert!(records[4].get("path_template").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn field_conventions_emit_exact_provider_trace_shapes() {
     for (convention, key, expected) in [
         (
@@ -471,7 +519,7 @@ async fn identifying_metadata_is_default_off_and_independently_opt_in() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn valid_encoded_paths_are_preserved_and_malformed_escapes_are_omitted() {
+async fn native_paths_are_preserved_exactly_and_queries_are_omitted() {
     let config = ObservabilityConfig::default().with_raw_path(true);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
@@ -479,18 +527,21 @@ async fn valid_encoded_paths_are_preserved_and_malformed_escapes_are_omitted() {
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(ObservabilityLayer::new(config));
 
-    for uri in [
-        "/objects/a%2Fb/%E2%9C%93",
-        "/objects/bad%2",
-        "/objects/bad%GG",
-        "/objects/bad%2G",
-        "/objects/bad%G2",
-        "/a%20%G2",
+    for (method, uri) in [
+        (Method::GET, "/objects/a%2Fb/%E2%9C%93"),
+        (Method::GET, "/objects/bad%2"),
+        (Method::GET, "/objects/bad%GG"),
+        (Method::GET, "/objects/bad%2G"),
+        (Method::GET, "/objects/bad%G2"),
+        (Method::GET, "/a%20%G2"),
+        (Method::GET, "/objects/query?secret=value"),
+        (Method::OPTIONS, "*"),
     ] {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
+                    .method(method)
                     .uri(uri)
                     .body(Body::empty())
                     .expect("request"),
@@ -501,14 +552,52 @@ async fn valid_encoded_paths_are_preserved_and_malformed_escapes_are_omitted() {
     }
 
     let records = capture.records();
-    assert_eq!(records.len(), 6);
-    assert_eq!(records[0]["path"], "/objects/a%2Fb/%E2%9C%93");
-    for record in &records[1..] {
-        assert!(
-            record.get("path").is_none(),
-            "malformed path was emitted: {record}"
-        );
+    assert_eq!(records.len(), 8);
+    for (record, expected) in records.iter().zip([
+        "/objects/a%2Fb/%E2%9C%93",
+        "/objects/bad%2",
+        "/objects/bad%GG",
+        "/objects/bad%2G",
+        "/objects/bad%G2",
+        "/a%20%G2",
+        "/objects/query",
+        "*",
+    ]) {
+        assert_eq!(record["path"], expected);
+        assert!(!record.to_string().contains("secret=value"));
     }
+    assert_eq!(records[7]["method"], "OPTIONS");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_uri_boundary_exposes_empty_connect_path_and_extracts_fragment_free_path() {
+    let no_explicit_target = Request::new(Body::empty());
+    assert_eq!(no_explicit_target.uri().path(), "/");
+
+    let config = ObservabilityConfig::default().with_raw_path(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(ObservabilityLayer::new(config));
+    let authority_form = Request::builder()
+        .method(Method::CONNECT)
+        .uri("example.test:443")
+        .body(Body::empty())
+        .expect("authority-form CONNECT request");
+    assert_eq!(authority_form.uri().path(), "");
+    let response = app.clone().oneshot(authority_form).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert!(capture.records()[0].get("path").is_none());
+
+    let fragment_target = Request::builder()
+        .uri("/objects#fragment")
+        .body(Body::empty())
+        .expect("request target with fragment syntax");
+    assert_eq!(fragment_target.uri().path(), "/objects");
+    let response = app.oneshot(fragment_target).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(capture.records()[1]["path"], "/objects");
 }
 
 #[tokio::test(flavor = "current_thread")]
