@@ -88,16 +88,11 @@ remain absent in this default example; GCP selection does not enable them.
 ## Provider-neutral JSON
 
 ```bash
-cargo run --quiet --example basic
+cargo check --locked --example basic
 ```
 
-The executable uses `ObservabilityConfig::default()` and therefore runs Level
-1. To enable Level 2, follow `level_2_config()`, which adds
-`with_trace_context_level(TraceContextLevel::Level2)`. Both configurations feed
-the same router construction, and the native example test sends a version-`00`
-traceparent with flags `03` through both. The default convention writes `level`
-and generic correlation fields without provider-specific aliases; only Level 2
-emits `trace_id_random`.
+The default convention writes `level` and generic correlation fields without
+provider-specific aliases.
 
 ## AWS
 
@@ -108,8 +103,7 @@ cargo check --locked --example aws
 The AWS convention keeps flat JSON. A valid W3C trace ID is also formatted as
 `xray_trace_id`, for example
 `1-4bf92f35-77b34da6a3ce929d0e0e4736`. The crate does not create X-Ray segments
-or parse `X-Amzn-Trace-Id`. The exact current profile is `0.1.0`; selecting
-`Aws` resolves to it, and `AwsProfileVersion::V0_1_0` pins it.
+or parse `X-Amzn-Trace-Id`.
 
 ## Azure
 
@@ -119,8 +113,7 @@ cargo check --locked --example azure
 
 The Azure convention maps valid W3C values to `operation_Id` and
 `operation_ParentId`. It does not initialize an Azure SDK or parse legacy
-`Request-Id` headers. The exact current profile is `0.1.0`; selecting `Azure`
-resolves to it, and `AzureProfileVersion::V0_1_0` pins it.
+`Request-Id` headers.
 
 ## Application logging
 

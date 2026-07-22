@@ -218,13 +218,6 @@ admits a valid 513-character value; 512 is not a package rejection ceiling.
 Empty members are retained and count toward the member limit. An invalid
 `tracestate` is discarded without invalidating a valid `traceparent`.
 
-The provider-neutral [`examples/basic.rs`](examples/basic.rs) uses
-`ObservabilityConfig::default()` for its Level 1 executable. To enable Level 2,
-follow `level_2_config()`, which calls
-`with_trace_context_level(TraceContextLevel::Level2)`. Its native example test
-sends flags `03` through both configurations and verifies that only Level 2
-emits `trace_id_random`.
-
 With valid trace context, `correlation_id` is the trace ID; otherwise it is the
 request ID. The incoming parent ID belongs to the caller. The crate does not
 claim it as a span created by this service, manufacture a current span ID, or
@@ -324,20 +317,11 @@ existing layer.
   `requestUrl`, `remoteIp`, and `userAgent`; method, status, and latency use
   `requestMethod`, numeric `status`, and a seconds string. The trace field is
   the bare validated 32-character W3C trace ID. The crate never emits a fake
-  `logging.googleapis.com/spanId`. Selecting `Gcp` resolves to the newest GCP
-  profile implemented by the installed crate, currently `0.1.0`; use
-  `with_gcp_profile_version(GcpProfileVersion::V0_1_0)` for an exact pin.
-- `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. Selecting it resolves to
-  exact current profile `0.1.0`; use
-  `with_aws_profile_version(AwsProfileVersion::V0_1_0)` for an exact pin and
-  `aws_profile_version()` for introspection. Other dynamic pins fail to parse.
-  It does not create an X-Ray segment or parse `X-Amzn-Trace-Id`.
-- `Azure` adds `operation_Id` and `operation_ParentId`. Selecting it resolves
-  to exact current profile `0.1.0`; use
-  `with_azure_profile_version(AzureProfileVersion::V0_1_0)` for an exact pin and
-  `azure_profile_version()` for introspection. Other dynamic pins fail to
-  parse. It does not initialize an Azure SDK or parse legacy `Request-Id`
-  headers.
+  `logging.googleapis.com/spanId`.
+- `Aws` adds `xray_trace_id` in `1-8hex-24hex` form. It does not create an X-Ray
+  segment or parse `X-Amzn-Trace-Id`.
+- `Azure` adds `operation_Id` and `operation_ParentId`. It does not initialize
+  an Azure SDK or parse legacy `Request-Id` headers.
 
 Provider trace fields are omitted without valid W3C context and never change
 which request metadata is captured. They correlate logs; trace creation,
@@ -380,9 +364,6 @@ remain responsible for choosing and monitoring the output destination.
 | Method | Default | Purpose |
 | --- | --- | --- |
 | `with_field_convention` | `FieldConvention::Generic` | Select one provider field convention |
-| `with_gcp_profile_version` | latest supported GCP version | Select and pin an exact GCP profile version |
-| `with_aws_profile_version` | current AWS profile | Select and pin exact AWS profile `0.1.0` |
-| `with_azure_profile_version` | current Azure profile | Select and pin exact Azure profile `0.1.0` |
 | `with_trace_context_level` | `TraceContextLevel::Level1` | Select W3C Trace Context Level 1 or Level 2 |
 | `with_request_id_header` | `x-request-id` | Set the request and response correlation header |
 | `with_response_header` | `true` | Enable or disable response-header injection |
@@ -395,11 +376,7 @@ remain responsible for choosing and monitoring the output destination.
 | `with_clock` | `Instant::now` | Supply a monotonic clock, primarily for deterministic tests |
 | `with_access_enricher` | no extra fields | Add synchronous application-owned terminal fields |
 
-`gcp_profile_version()`, `aws_profile_version()`,
-`azure_profile_version()`, and `trace_context_level()` expose resolved
-non-secret settings for diagnostics and conformance evidence. Unsupported
-dynamic profile pins fail when parsed as their typed version; no network lookup
-is performed.
+`trace_context_level()` exposes the resolved W3C grammar level.
 
 Unknown options do not exist: configuration is compile-time checked. The header
 setter accepts a validated `http::HeaderName`; use `HeaderName::from_static` or

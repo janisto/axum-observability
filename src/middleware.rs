@@ -28,8 +28,8 @@ use tracing::{Instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::{
-    AwsProfileVersion, AzureProfileVersion, FieldConvention, GcpProfileVersion, JsonLayer,
-    OperationId, RequestContext, RequestId, TraceContext, TraceContextLevel,
+    FieldConvention, JsonLayer, OperationId, RequestContext, RequestId, TraceContext,
+    TraceContextLevel,
     request_id::native_field_content,
     trace_context::{parse_traceparent_with_level, parse_tracestate_with_level},
 };
@@ -49,9 +49,6 @@ type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + 
 )]
 pub struct ObservabilityConfig {
     pub(crate) field_convention: FieldConvention,
-    gcp_profile_version: Option<GcpProfileVersion>,
-    aws_profile_version: Option<AwsProfileVersion>,
-    azure_profile_version: Option<AzureProfileVersion>,
     trace_context_level: TraceContextLevel,
     request_id_header: HeaderName,
     response_header: bool,
@@ -71,9 +68,6 @@ impl fmt::Debug for ObservabilityConfig {
         let mut debug = formatter.debug_struct("ObservabilityConfig");
         debug
             .field("field_convention", &self.field_convention)
-            .field("gcp_profile_version", &self.gcp_profile_version)
-            .field("aws_profile_version", &self.aws_profile_version)
-            .field("azure_profile_version", &self.azure_profile_version)
             .field("trace_context_level", &self.trace_context_level)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
@@ -90,9 +84,6 @@ impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             field_convention: FieldConvention::Generic,
-            gcp_profile_version: None,
-            aws_profile_version: None,
-            azure_profile_version: None,
             trace_context_level: TraceContextLevel::Level1,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
@@ -114,64 +105,7 @@ impl ObservabilityConfig {
     #[must_use = "configuration builders return a new value"]
     pub fn with_field_convention(mut self, convention: FieldConvention) -> Self {
         self.field_convention = convention;
-        self.gcp_profile_version =
-            (convention == FieldConvention::Gcp).then_some(GcpProfileVersion::LATEST);
-        self.aws_profile_version =
-            (convention == FieldConvention::Aws).then_some(AwsProfileVersion::LATEST);
-        self.azure_profile_version =
-            (convention == FieldConvention::Azure).then_some(AzureProfileVersion::LATEST);
         self
-    }
-
-    /// Selects an exact supported Google Cloud structured-stdout profile.
-    ///
-    /// Use [`Self::with_field_convention`] with [`FieldConvention::Gcp`] to
-    /// select the newest profile implemented by this installed crate.
-    #[must_use = "configuration builders return a new value"]
-    pub fn with_gcp_profile_version(mut self, version: GcpProfileVersion) -> Self {
-        self.field_convention = FieldConvention::Gcp;
-        self.gcp_profile_version = Some(version);
-        self.aws_profile_version = None;
-        self.azure_profile_version = None;
-        self
-    }
-
-    /// Returns the resolved Google Cloud profile version, when selected.
-    #[must_use]
-    pub const fn gcp_profile_version(&self) -> Option<GcpProfileVersion> {
-        self.gcp_profile_version
-    }
-
-    /// Selects an exact supported AWS structured-stdout profile.
-    #[must_use = "configuration builders return a new value"]
-    pub fn with_aws_profile_version(mut self, version: AwsProfileVersion) -> Self {
-        self.field_convention = FieldConvention::Aws;
-        self.gcp_profile_version = None;
-        self.aws_profile_version = Some(version);
-        self.azure_profile_version = None;
-        self
-    }
-
-    /// Returns the resolved AWS profile version, when selected.
-    #[must_use]
-    pub const fn aws_profile_version(&self) -> Option<AwsProfileVersion> {
-        self.aws_profile_version
-    }
-
-    /// Selects an exact supported Azure structured-stdout profile.
-    #[must_use = "configuration builders return a new value"]
-    pub fn with_azure_profile_version(mut self, version: AzureProfileVersion) -> Self {
-        self.field_convention = FieldConvention::Azure;
-        self.gcp_profile_version = None;
-        self.aws_profile_version = None;
-        self.azure_profile_version = Some(version);
-        self
-    }
-
-    /// Returns the resolved Azure profile version, when selected.
-    #[must_use]
-    pub const fn azure_profile_version(&self) -> Option<AzureProfileVersion> {
-        self.azure_profile_version
     }
 
     /// Selects the W3C Trace Context level used for inbound requests.

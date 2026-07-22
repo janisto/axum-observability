@@ -8,8 +8,7 @@ use axum::{
     routing::get,
 };
 use axum_observability::{
-    AwsProfileVersion, AzureProfileVersion, GcpProfileVersion, ObservabilityConfig,
-    ObservabilityLayer, RequestContext, TraceContextLevel,
+    FieldConvention, ObservabilityConfig, ObservabilityLayer, RequestContext, TraceContextLevel,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -89,10 +88,10 @@ fn configured_case(name: &str) -> Result<ObservabilityConfig, Box<dyn Error>> {
         "common_level2" => {
             ObservabilityConfig::default().with_trace_context_level(TraceContextLevel::Level2)
         }
-        "aws_level1" => level_one.with_aws_profile_version(AwsProfileVersion::V0_1_0),
-        "azure_level1" => level_one.with_azure_profile_version(AzureProfileVersion::V0_1_0),
+        "aws_level1" => level_one.with_field_convention(FieldConvention::Aws),
+        "azure_level1" => level_one.with_field_convention(FieldConvention::Azure),
         "gcp_level1" => level_one
-            .with_gcp_profile_version(GcpProfileVersion::V0_1_0)
+            .with_field_convention(FieldConvention::Gcp)
             .with_access_enricher(|_| {
                 BTreeMap::from([(
                     "e2e_configuration".to_owned(),

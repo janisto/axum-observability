@@ -34,16 +34,12 @@ The changes in this section target `2.0.0` and must not be published on the
 
 ### Added
 
-- Added exact current `0.1.0` profiles for GCP, AWS, and Azure with convention
-  selection, exact typed pinning, and effective-version introspection without
-  network lookup.
+- Added GCP, AWS, and Azure provider field conventions.
 - Added typed W3C Trace Context Level 1/Level 2 configuration, with Level 1 as
   the default and Level 2 random trace-ID flag projection.
 
 ### Changed
 
-- Expanded the provider-neutral basic example with the Level 1 default, an
-  explicit Level 2 configuration path, and behavioral output tests.
 - Removed the v1 direct JSON-layer constructor so v2 exposes one config-owned
   JSON-layer construction path; callers must finalize and reuse the same
   unchanged configuration for middleware coherence.
