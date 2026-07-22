@@ -5,6 +5,7 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
     let generator_secret = "generator-secret-must-not-leak".to_owned();
     let config = ObservabilityConfig::default()
         .with_field_convention(FieldConvention::Aws)
+        .with_trace_context_level(TraceContextLevel::Level2)
         .with_request_id_header(HeaderName::from_static("x-correlation-id"))
         .with_response_header(false)
         .with_raw_path(true)
@@ -20,6 +21,7 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
     for expected in [
         "ObservabilityConfig",
         "field_convention: Aws",
+        "trace_context_level: Level2",
         "request_id_header: \"x-correlation-id\"",
         "response_header: false",
         "raw_path: true",
@@ -47,11 +49,20 @@ fn configuration_debug_reports_safe_policies_without_callback_internals() {
     assert!(!debug.contains("generator-secret-must-not-leak"));
 }
 
+#[test]
+fn trace_context_level_defaults_to_one_and_can_be_selected_explicitly() {
+    let level_one = ObservabilityConfig::default();
+    assert_eq!(level_one.trace_context_level(), TraceContextLevel::Level1);
+
+    let level_two = level_one.with_trace_context_level(TraceContextLevel::Level2);
+    assert_eq!(level_two.trace_context_level(), TraceContextLevel::Level2);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn custom_header_validator_and_response_header_configuration_are_effective() {
     let config = ObservabilityConfig::default()
         .with_request_id_header(HeaderName::from_static("x-correlation-id"))
-        .with_request_id_validator(|value| value.as_str().starts_with("custom-"))
+        .with_request_id_validator(|value| value.starts_with("custom-"))
         .with_request_id_generator(|| {
             Some(RequestId::parse("custom-generated").expect("valid generated ID"))
         });
@@ -117,6 +128,24 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
                 ("status".to_owned(), Value::from(999)),
                 ("target".to_owned(), Value::String("spoofed".to_owned())),
                 (
+                    "logging.googleapis.com/trace".to_owned(),
+                    Value::String("spoofed-provider".to_owned()),
+                ),
+                (
+                    "logging.googleapis.com/spanId".to_owned(),
+                    Value::String("application-span".to_owned()),
+                ),
+                (
+                    "logging.googleapis.com/labels".to_owned(),
+                    serde_json::json!({"component": "worker"}),
+                ),
+                ("obs.internal".to_owned(), Value::Bool(true)),
+                ("_obs_internal".to_owned(), Value::Bool(true)),
+                (
+                    "remote_ip".to_owned(),
+                    Value::String("203.0.113.10".to_owned()),
+                ),
+                (
                     "request_id".to_owned(),
                     Value::String(format!("spoofed-{}", context.request_id())),
                 ),
@@ -134,19 +163,29 @@ async fn custom_level_clock_enrichment_and_operation_id_preserve_reserved_fields
         .expect("request");
     request
         .extensions_mut()
-        .insert(OperationId::from_static("list-items"));
+        .insert(OperationId::from_static("list-items\nvariant"));
     let response = app.oneshot(request).await.expect("response");
     to_bytes(response.into_body(), 1_024).await.expect("body");
 
     let records = capture.records();
     let record = &records[0];
     assert_eq!(record["level"], "ERROR");
-    assert_eq!(record["duration_ms"], 1_500.0);
+    assert_eq!(record["duration_ms"], 1_500);
+    assert!(record["duration_ms"].is_u64());
     assert_eq!(record["tenant"], "public");
     assert_eq!(record["status"], 200);
     assert_eq!(record["target"], "axum_observability::access");
     assert_eq!(record["request_id"], "real-request");
-    assert_eq!(record["operation_id"], "list-items");
+    assert_eq!(record["operation_id"], "list-items\nvariant");
+    assert_eq!(record["logging.googleapis.com/trace"], "spoofed-provider");
+    assert_eq!(record["logging.googleapis.com/spanId"], "application-span");
+    assert_eq!(
+        record["logging.googleapis.com/labels"]["component"],
+        "worker"
+    );
+    assert_eq!(record["obs.internal"], true);
+    assert_eq!(record["_obs_internal"], true);
+    assert_eq!(record["remote_ip"], "203.0.113.10");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -1,12 +1,25 @@
 use std::collections::HashSet;
 
-use crate::TraceContext;
+use crate::{TraceContext, TraceContextLevel};
 
 /// Parses a single W3C `traceparent` value using strict lowercase framing.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn parse_traceparent(value: &str) -> Option<TraceContext> {
-    let bytes = value.as_bytes();
-    if !(55..=512).contains(&bytes.len())
+    parse_traceparent_with_level(value, TraceContextLevel::Level1)
+}
+
+/// Parses one W3C `traceparent` value for the selected Trace Context level.
+#[must_use]
+pub(crate) fn parse_traceparent_with_level(
+    value: impl AsRef<[u8]>,
+    level: TraceContextLevel,
+) -> Option<TraceContext> {
+    let bytes = value.as_ref();
+    if bytes.len() < 55
+        || bytes
+            .iter()
+            .any(|byte| (*byte < 0x20 && *byte != b'\t') || *byte == 0x7f)
         || bytes[2] != b'-'
         || bytes[35] != b'-'
         || bytes[52] != b'-'
@@ -29,40 +42,52 @@ pub(crate) fn parse_traceparent(value: &str) -> Option<TraceContext> {
         return None;
     }
 
+    let version = decode_hex_byte(bytes[0], bytes[1]);
     let flags = decode_hex_byte(bytes[53], bytes[54]);
     Some(TraceContext::new(
-        value[3..35].to_owned(),
-        value[36..52].to_owned(),
+        version,
+        std::str::from_utf8(&bytes[3..35]).ok()?.to_owned(),
+        std::str::from_utf8(&bytes[36..52]).ok()?.to_owned(),
         flags,
-        value.to_owned(),
+        level,
+        bytes.to_vec().into_boxed_slice(),
     ))
 }
 
 /// Validates and combines W3C `tracestate` header values in wire order.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn parse_tracestate<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    let combined = values.into_iter().collect::<Vec<_>>().join(",");
-    if combined.is_empty() || combined.len() > 512 {
+    parse_tracestate_with_level(values, TraceContextLevel::Level1)
+}
+
+/// Validates and combines W3C `tracestate` values for the selected level.
+#[must_use]
+pub(crate) fn parse_tracestate_with_level<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+    level: TraceContextLevel,
+) -> Option<String> {
+    let values = values.into_iter().collect::<Vec<_>>();
+    if values.is_empty() {
         return None;
     }
-
+    let combined = values.join(",");
     let mut seen = HashSet::new();
     let members = combined
         .split(',')
         .map(|member| member.trim_matches([' ', '\t']))
-        .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
-    if members.is_empty() {
-        return None;
-    }
     if members.len() > 32 {
         return None;
     }
 
     for member in &members {
+        if member.is_empty() {
+            continue;
+        }
         let (key, value) = member.split_once('=')?;
         if value.contains('=')
-            || !is_valid_tracestate_key(key)
+            || !is_valid_tracestate_key(key, level)
             || !is_valid_tracestate_value(value)
             || !seen.insert(key)
         {
@@ -91,11 +116,22 @@ fn hex_nibble(value: u8) -> u8 {
     }
 }
 
-fn is_valid_tracestate_key(key: &str) -> bool {
+fn is_valid_tracestate_key(key: &str, level: TraceContextLevel) -> bool {
     if key.is_empty() || key.len() > 256 || !key.is_ascii() {
         return false;
     }
 
+    match level {
+        TraceContextLevel::Level1 => is_valid_level_one_key(key),
+        TraceContextLevel::Level2 => {
+            let first = key.as_bytes()[0];
+            (first.is_ascii_lowercase() || first.is_ascii_digit())
+                && key.bytes().all(is_level_two_key_char)
+        }
+    }
+}
+
+fn is_valid_level_one_key(key: &str) -> bool {
     if let Some((tenant, system)) = key.split_once('@') {
         !tenant.is_empty()
             && tenant.len() <= 241
@@ -115,6 +151,10 @@ fn is_key_char(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'*' | b'/')
 }
 
+fn is_level_two_key_char(byte: u8) -> bool {
+    is_key_char(byte) || byte == b'@'
+}
+
 fn is_valid_tracestate_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -130,7 +170,11 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{parse_traceparent, parse_tracestate};
+    use super::{
+        parse_traceparent, parse_traceparent_with_level, parse_tracestate,
+        parse_tracestate_with_level,
+    };
+    use crate::TraceContextLevel;
 
     const VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -141,7 +185,36 @@ mod tests {
         assert_eq!(parsed.parent_id(), "00f067aa0ba902b7");
         assert_eq!(parsed.flags(), 1);
         assert!(parsed.sampled());
-        assert_eq!(parsed.traceparent(), VALID);
+        assert_eq!(parsed.trace_context_level(), TraceContextLevel::Level1);
+        assert_eq!(parsed.trace_id_random(), None);
+        assert_eq!(parsed.traceparent(), Some(VALID));
+        assert_eq!(parsed.traceparent_bytes(), VALID.as_bytes());
+    }
+
+    #[test]
+    fn level_two_projects_the_random_trace_id_flag() {
+        let random =
+            parse_traceparent_with_level(VALID.replace("-01", "-03"), TraceContextLevel::Level2)
+                .expect("flags 03");
+        assert_eq!(random.trace_context_level(), TraceContextLevel::Level2);
+        assert_eq!(random.trace_id_random(), Some(true));
+
+        let not_random =
+            parse_traceparent_with_level(VALID, TraceContextLevel::Level2).expect("flags 01");
+        assert_eq!(not_random.trace_id_random(), Some(false));
+    }
+
+    #[test]
+    fn future_version_level_two_preserves_sampling_without_assigning_random() {
+        for (flags, sampled) in [("02", false), ("03", true)] {
+            let value =
+                format!("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-{flags}-opaque");
+            let trace = parse_traceparent_with_level(&value, TraceContextLevel::Level2)
+                .expect("future version");
+            assert_eq!(trace.sampled(), sampled);
+            assert_eq!(trace.trace_id_random(), None);
+            assert_eq!(trace.trace_context_level(), TraceContextLevel::Level2);
+        }
     }
 
     #[test]
@@ -183,24 +256,45 @@ mod tests {
             format!("{future}-"),
             format!("{future}-vendor"),
             format!("{future}-vendor space"),
-            format!("{future}-opaque-ümlaut"),
+            format!("{future}-~"),
         ] {
             assert!(parse_traceparent(&value).is_some(), "rejected {value:?}");
         }
     }
 
     #[test]
-    fn rejects_invalid_future_delimiter_and_oversized_traceparent() {
+    fn enforces_native_field_safety_without_an_invented_length_ceiling() {
         let future = VALID.replacen("00-", "01-", 1);
         for invalid in [
-            format!("{future}vendor"),
-            format!("{future}-{}", "x".repeat(512)),
+            format!("{future}-opaque\u{1f}"),
+            format!("{future}-opaque\u{7f}"),
         ] {
             assert!(
                 parse_traceparent(&invalid).is_none(),
                 "accepted {invalid:?}"
             );
         }
+        let long = format!("{future}-{}", "x".repeat(512));
+        assert!(long.len() > 512);
+        assert!(parse_traceparent(&long).is_some());
+        assert!(parse_traceparent(&format!("{future}-opaque-ümlaut")).is_some());
+
+        let mut obs_text = format!("{future}-opaque-").into_bytes();
+        obs_text.push(0x80);
+        let parsed = parse_traceparent_with_level(&obs_text, TraceContextLevel::Level1)
+            .expect("HTTP obs-text suffix remains opaque");
+        assert_eq!(parsed.traceparent_bytes(), obs_text);
+        assert_eq!(parsed.traceparent(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_future_delimiter() {
+        let future = VALID.replacen("00-", "01-", 1);
+        let invalid = format!("{future}vendor");
+        assert!(
+            parse_traceparent(&invalid).is_none(),
+            "accepted {invalid:?}"
+        );
     }
 
     #[test]
@@ -216,16 +310,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_and_omits_empty_tracestate_list_members() {
+    fn accepts_and_preserves_empty_tracestate_list_members() {
         assert_eq!(
             parse_tracestate([" , vendor=value,,\t", "tenant@system=opaque,"]),
-            Some("vendor=value,tenant@system=opaque".to_owned())
+            Some(",vendor=value,,,tenant@system=opaque,".to_owned())
         );
-        assert!(parse_tracestate([" , \t,"]).is_none());
+        assert_eq!(parse_tracestate([" , \t,"]), Some(",,".to_owned()));
+        assert_eq!(parse_tracestate([""]), Some(String::new()));
 
         let thirty_two_with_empty_members = format!(
-            ",{},,",
-            (0..32)
+            ",{},",
+            (0..30)
                 .map(|index| format!("k{index}=v"))
                 .collect::<Vec<_>>()
                 .join(",")
@@ -250,9 +345,9 @@ mod tests {
         let maximum = format!("{}={}", "a".repeat(256), "v".repeat(255));
         assert_eq!(maximum.len(), 512);
         assert!(parse_tracestate([maximum.as_str()]).is_some());
-        let oversized = format!("{}={}", "a".repeat(256), "v".repeat(256));
-        assert_eq!(oversized.len(), 513);
-        assert!(parse_tracestate([oversized.as_str()]).is_none());
+        let beyond_minimum = format!("{}={}", "a".repeat(256), "v".repeat(256));
+        assert_eq!(beyond_minimum.len(), 513);
+        assert!(parse_tracestate([beyond_minimum.as_str()]).is_some());
 
         let thirty_two = (0..32)
             .map(|index| format!("k{index}=v"))
@@ -304,6 +399,27 @@ mod tests {
     }
 
     #[test]
+    fn level_two_uses_its_flat_at_sign_key_grammar() {
+        for valid in ["1simple=1", "tenant@system@edge=1"] {
+            assert!(
+                parse_tracestate_with_level([valid], TraceContextLevel::Level2).is_some(),
+                "rejected {valid:?}"
+            );
+            assert!(
+                parse_tracestate_with_level([valid], TraceContextLevel::Level1).is_none(),
+                "Level 1 accepted {valid:?}"
+            );
+        }
+
+        for invalid in ["Upper=1", "tenant:@system=1", "@system=1"] {
+            assert!(
+                parse_tracestate_with_level([invalid], TraceContextLevel::Level2).is_none(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn enforces_tracestate_value_grammar() {
         let maximum = format!("a={}", "v".repeat(256));
         assert!(parse_tracestate([maximum.as_str()]).is_some());
@@ -349,7 +465,7 @@ mod tests {
             prop_assert_eq!(parsed.parent_id(), parent_id.as_str());
             prop_assert_eq!(parsed.flags(), flags);
             prop_assert_eq!(parsed.sampled(), flags & 1 == 1);
-            prop_assert_eq!(parsed.traceparent(), value.as_str());
+            prop_assert_eq!(parsed.traceparent(), Some(value.as_str()));
         }
 
         #[test]

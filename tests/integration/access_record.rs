@@ -1,6 +1,165 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
+async fn extension_method_case_is_preserved_through_axum_and_writer() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NO_CONTENT })
+        .layer(ObservabilityLayer::new(config));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("m-SEARCH")
+                .uri("/search")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+
+    assert_eq!(capture.records()[0]["method"], "m-SEARCH");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn route_identity_is_canonical_stable_and_omits_unmatched_metadata() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let long_name = "a".repeat(65);
+    let long_route = format!("/long/{{{long_name}}}");
+    let app = Router::new()
+        .route(
+            "/items/{item_id}",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_item")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .route(
+            "/files/{*path}",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_file")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .route(
+            &long_route,
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_long")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .route(
+            "/literal*star",
+            get(|| async {
+                (
+                    Extension(OperationId::from_static("get_literal_star")),
+                    StatusCode::OK,
+                )
+            }),
+        )
+        .layer(ObservabilityLayer::new(config));
+
+    for uri in [
+        "/items/tenant-a",
+        "/items/tenant-b",
+        "/long/value",
+        "/literal*star",
+        "/files/tenant-a/one",
+        "/files/tenant-b/two",
+        "/missing/private-value",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 7);
+    for record in &records[0..2] {
+        assert_eq!(record["path_template"], "/items/{item_id}");
+        assert_eq!(record["operation_id"], "get_item");
+    }
+    assert_eq!(records[2]["path_template"], long_route);
+    assert_eq!(records[2]["operation_id"], "get_long");
+    assert_eq!(records[3]["path_template"], "/literal*star");
+    assert_eq!(records[3]["operation_id"], "get_literal_star");
+    for record in &records[4..6] {
+        assert_eq!(record["path_template"], "/files/{*path}");
+        assert_eq!(record["operation_id"], "get_file");
+    }
+    assert!(records[6].get("path_template").is_none());
+    assert!(records[6].get("operation_id").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_route_language_supports_prefix_composite_but_not_optional_segments() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route(
+            "/reports/report-{year}",
+            get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route("/items/{item?}", get(|| async { StatusCode::NO_CONTENT }))
+        .layer(ObservabilityLayer::new(config));
+
+    for (uri, expected_status) in [
+        ("/reports/report-2026", StatusCode::NO_CONTENT),
+        ("/reports/report-2027", StatusCode::NO_CONTENT),
+        ("/reports/2026", StatusCode::NOT_FOUND),
+        ("/items/value", StatusCode::NO_CONTENT),
+        ("/items", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "unexpected GET {uri} status"
+        );
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 5);
+    for record in &records[..2] {
+        assert_eq!(record["path_template"], "/reports/report-{year}");
+    }
+    assert!(records[2].get("path_template").is_none());
+    assert_eq!(records[3]["path_template"], "/items/{item?}");
+    assert!(records[4].get("path_template").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn field_conventions_emit_exact_provider_trace_shapes() {
     for (convention, key, expected) in [
         (
@@ -99,7 +258,9 @@ async fn field_conventions_emit_exact_non_conflicting_access_schemas() {
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "unexpected {convention:?} schema");
         assert!(record["status"].is_u64());
-        assert!(record["duration_ms"].is_f64());
+        assert!(record["duration_ms"].is_number());
+        assert_eq!(record["trace_flags"], "01");
+        assert!(record.get("trace_id_random").is_none());
         assert_eq!(record["path"], "/items/42");
         assert!(!record.to_string().contains("secret=query"));
     }
@@ -158,7 +319,7 @@ async fn response_abandonment_adds_only_its_documented_terminal_field() {
 }
 
 #[test]
-fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
+fn external_invalid_trace_fields_do_not_enter_records_or_emit_aws_metadata() {
     let config = ObservabilityConfig::default().with_field_convention(FieldConvention::Aws);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
@@ -179,8 +340,8 @@ fn invalid_request_span_trace_ids_do_not_emit_aws_metadata() {
 
     let records = capture.records();
     assert_eq!(records.len(), invalid.len());
-    for (record, trace_id) in records.iter().zip(invalid) {
-        assert_eq!(record["trace_id"], trace_id);
+    for record in records {
+        assert!(record.get("trace_id").is_none());
         assert!(record.get("xray_trace_id").is_none());
     }
 }
@@ -358,7 +519,89 @@ async fn identifying_metadata_is_default_off_and_independently_opt_in() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ambiguous_or_non_text_user_agent_is_omitted() {
+async fn native_paths_are_preserved_exactly_and_queries_are_omitted() {
+    let config = ObservabilityConfig::default().with_raw_path(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(ObservabilityLayer::new(config));
+
+    for (method, uri) in [
+        (Method::GET, "/objects/a%2Fb/%E2%9C%93"),
+        (Method::GET, "/objects/bad%2"),
+        (Method::GET, "/objects/bad%GG"),
+        (Method::GET, "/objects/bad%2G"),
+        (Method::GET, "/objects/bad%G2"),
+        (Method::GET, "/a%20%G2"),
+        (Method::GET, "/objects/query?secret=value"),
+        (Method::OPTIONS, "*"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        to_bytes(response.into_body(), 1_024).await.expect("body");
+    }
+
+    let records = capture.records();
+    assert_eq!(records.len(), 8);
+    for (record, expected) in records.iter().zip([
+        "/objects/a%2Fb/%E2%9C%93",
+        "/objects/bad%2",
+        "/objects/bad%GG",
+        "/objects/bad%2G",
+        "/objects/bad%G2",
+        "/a%20%G2",
+        "/objects/query",
+        "*",
+    ]) {
+        assert_eq!(record["path"], expected);
+        assert!(!record.to_string().contains("secret=value"));
+    }
+    assert_eq!(records[7]["method"], "OPTIONS");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_uri_boundary_exposes_empty_connect_path_and_extracts_fragment_free_path() {
+    let no_explicit_target = Request::new(Body::empty());
+    assert_eq!(no_explicit_target.uri().path(), "/");
+
+    let config = ObservabilityConfig::default().with_raw_path(true);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(ObservabilityLayer::new(config));
+    let authority_form = Request::builder()
+        .method(Method::CONNECT)
+        .uri("example.test:443")
+        .body(Body::empty())
+        .expect("authority-form CONNECT request");
+    assert_eq!(authority_form.uri().path(), "");
+    let response = app.clone().oneshot(authority_form).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert!(capture.records()[0].get("path").is_none());
+
+    let fragment_target = Request::builder()
+        .uri("/objects#fragment")
+        .body(Body::empty())
+        .expect("request target with fragment syntax");
+    assert_eq!(fragment_target.uri().path(), "/objects");
+    let response = app.oneshot(fragment_target).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(capture.records()[1]["path"], "/objects");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ambiguous_or_non_text_user_agent_is_omitted_but_htab_is_preserved() {
     let config = ObservabilityConfig::default().with_user_agent(true);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
@@ -384,15 +627,48 @@ async fn ambiguous_or_non_text_user_agent_is_omitted() {
         )
         .body(Body::empty())
         .expect("request");
-    app.oneshot(request).await.expect("response");
+    app.clone().oneshot(request).await.expect("response");
+
+    let empty = Request::builder()
+        .uri("/")
+        .header("user-agent", HeaderValue::from_static(""))
+        .body(Body::empty())
+        .expect("request");
+    app.clone().oneshot(empty).await.expect("response");
+
+    for value in [b" agent/1".as_slice(), b"agent/1 ".as_slice()] {
+        let edge_whitespace = Request::builder()
+            .uri("/")
+            .header(
+                "user-agent",
+                HeaderValue::from_bytes(value).expect("native header with edge whitespace"),
+            )
+            .body(Body::empty())
+            .expect("request");
+        app.clone()
+            .oneshot(edge_whitespace)
+            .await
+            .expect("response");
+    }
+
+    let tab = Request::builder()
+        .uri("/")
+        .header(
+            "user-agent",
+            HeaderValue::from_bytes(b"agent/1\tforged").expect("header with tab"),
+        )
+        .body(Body::empty())
+        .expect("request");
+    app.oneshot(tab).await.expect("response");
 
     let records = capture.records();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 6);
     assert!(
-        records
+        records[..5]
             .iter()
             .all(|record| record.get("user_agent").is_none())
     );
+    assert_eq!(records[5]["user_agent"], "agent/1\tforged");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -407,7 +683,7 @@ async fn enabled_single_text_user_agent_is_recorded() {
         .oneshot(
             Request::builder()
                 .uri("/")
-                .header("user-agent", "agent/1")
+                .header("user-agent", "agent/1 component/2")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -417,7 +693,7 @@ async fn enabled_single_text_user_agent_is_recorded() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["user_agent"], "agent/1");
+    assert_eq!(records[0]["user_agent"], "agent/1 component/2");
 }
 
 #[tokio::test(flavor = "current_thread")]

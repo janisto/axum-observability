@@ -5,24 +5,35 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::RequestId;
+use crate::{RequestId, TraceContextLevel};
 
 /// Validated inbound W3C trace context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceContext {
+    version: u8,
     trace_id: String,
     parent_id: String,
     flags: u8,
-    traceparent: String,
+    level: TraceContextLevel,
+    traceparent: Box<[u8]>,
     tracestate: Option<String>,
 }
 
 impl TraceContext {
-    pub(crate) fn new(trace_id: String, parent_id: String, flags: u8, traceparent: String) -> Self {
+    pub(crate) fn new(
+        version: u8,
+        trace_id: String,
+        parent_id: String,
+        flags: u8,
+        level: TraceContextLevel,
+        traceparent: Box<[u8]>,
+    ) -> Self {
         Self {
+            version,
             trace_id,
             parent_id,
             flags,
+            level,
             traceparent,
             tracestate: None,
         }
@@ -57,10 +68,34 @@ impl TraceContext {
         self.flags & 1 == 1
     }
 
-    /// Accepted raw `traceparent` value.
+    /// Selected W3C Trace Context level.
     #[must_use]
-    pub fn traceparent(&self) -> &str {
+    pub const fn trace_context_level(&self) -> TraceContextLevel {
+        self.level
+    }
+
+    /// Whether the caller marked the trace ID as random in Level 2 mode.
+    ///
+    /// Level 1 does not assign portable meaning to this flag, so it returns
+    /// `None` even when bit one is set.
+    #[must_use]
+    pub const fn trace_id_random(&self) -> Option<bool> {
+        match (self.level, self.version) {
+            (TraceContextLevel::Level2, 0) => Some(self.flags & 2 == 2),
+            (TraceContextLevel::Level1 | TraceContextLevel::Level2, _) => None,
+        }
+    }
+
+    /// Accepted raw `traceparent` bytes.
+    #[must_use]
+    pub fn traceparent_bytes(&self) -> &[u8] {
         &self.traceparent
+    }
+
+    /// Accepted raw `traceparent` as UTF-8 when its opaque future suffix is text.
+    #[must_use]
+    pub fn traceparent(&self) -> Option<&str> {
+        std::str::from_utf8(&self.traceparent).ok()
     }
 
     /// Accepted combined `tracestate`, when valid.
@@ -228,5 +263,11 @@ mod tests {
     #[should_panic(expected = "operation ID must not be empty")]
     fn operation_id_rejects_empty_static_values() {
         let _ = OperationId::from_static("");
+    }
+
+    #[test]
+    fn operation_id_preserves_application_static_controls() {
+        let operation = OperationId::from_static("create-item\nvariant");
+        assert_eq!(operation.as_str(), "create-item\nvariant");
     }
 }

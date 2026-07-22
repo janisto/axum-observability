@@ -35,6 +35,27 @@ pub use formatter::JsonLayer;
 pub use middleware::{ObservabilityConfig, ObservabilityLayer, ObservabilityService};
 pub use request_id::{InvalidRequestId, RequestId};
 
+/// W3C Trace Context level used for inbound validation and projection.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TraceContextLevel {
+    /// W3C Trace Context Level 1. This is the default.
+    #[default]
+    Level1,
+    /// W3C Trace Context Level 2, including the random trace-ID flag.
+    Level2,
+}
+
+impl TraceContextLevel {
+    /// Returns the numeric W3C Trace Context level.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Level1 => 1,
+            Self::Level2 => 2,
+        }
+    }
+}
+
 /// Structured logging field convention.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -53,10 +74,17 @@ pub enum FieldConvention {
 
 #[cfg(test)]
 mod tests {
-    use super::FieldConvention;
+    use super::{FieldConvention, TraceContextLevel};
 
     #[test]
     fn generic_is_the_default_field_convention() {
         assert_eq!(FieldConvention::default(), FieldConvention::Generic);
+    }
+
+    #[test]
+    fn level_one_is_the_default_trace_context_level() {
+        assert_eq!(TraceContextLevel::default(), TraceContextLevel::Level1);
+        assert_eq!(TraceContextLevel::Level1.as_u8(), 1);
+        assert_eq!(TraceContextLevel::Level2.as_u8(), 2);
     }
 }

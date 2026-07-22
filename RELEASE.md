@@ -89,8 +89,8 @@ The **Publish to crates.io** job performs this sequence:
 4. installs Rust 1.97.0 with `rustfmt` and Clippy;
 5. reads package metadata with locked Cargo resolution and requires the package
    version to match the release tag exactly;
-6. runs formatting, Clippy with warnings denied, all targets and features,
-   rustdoc with warnings denied, `cargo package --locked`, and
+6. runs formatting, Clippy with warnings denied, tests for all targets and
+   features, rustdoc with warnings denied, `cargo package --locked`, and
    `cargo publish --dry-run --locked`;
 7. requests a temporary token from crates.io using GitHub OIDC only after every
    validation step succeeds; and
@@ -108,11 +108,40 @@ same commit passed pull-request CI. Hosted PR checks prove the reviewed source;
 release checks prove the immutable version/tag relationship and package at the
 publication boundary.
 
+## Release preparation branch and consumer image
+
+Every release preparation uses a same-repository source branch named
+`release/prepare-vX.Y.Z`, targets `main`, and uses the pull request title
+`chore: prepare vX.Y.Z`. The branch and title versions must agree with the
+version being released. When this repository permits a prerelease, use its
+exact reviewed prerelease suffix in both the branch and title. The `release/`
+namespace is used only for this process.
+
+The conditional `Consumer image build` CI job runs for a same-repository
+release preparation pull request targeting `main`. It builds the
+production-shaped consumer with
+`just e2e-image observability-e2e-local:ci`. The build verifies packaging and
+integration only. It does not run the image, validate emitted logs, compare
+implementations, or approve a release. It is not a required status check. For
+local image diagnosis, run:
+
+```bash
+just e2e-image observability-e2e-local:manual
+```
+
+The recipe prefers Podman and falls back to Docker.
+
+Optional independent tooling may exercise the public contract documented in
+[`e2e/README.md`](e2e/README.md). Any audit result is informational only; it is
+never a publication requirement and neither approves nor blocks publication.
+Publishing the reviewed GitHub Release is the maintainer's manual authorization
+for the crates.io upload.
+
 ## Maintainer release guide
 
 ### 1. Prepare the version
 
-Create a normal review branch and:
+Create `release/prepare-vX.Y.Z` from the current `main` branch and:
 
 1. update `Cargo.toml#package.version`;
 2. refresh `Cargo.lock` through Cargo when the package metadata requires it;
@@ -141,25 +170,37 @@ git status --short
 
 `just qa` runs formatting, Clippy with warnings denied, all tests and examples,
 doctests, dependency policy, the RustSec audit, actionlint, and
-[zizmor](https://docs.zizmor.sh/). `cargo publish --dry-run --locked` performs
-Cargo's standard package and publication validation without uploading the
-crate.
+[zizmor](https://docs.zizmor.sh/).
+`cargo publish --dry-run --locked` performs Cargo's standard package and
+publication validation without uploading the crate.
 
-Merge the release preparation through a green pull request to `main`.
+Merge the release preparation through a green pull request. If the conditional
+`Consumer image build` ran, inspect it as an additional packaging diagnostic.
+The maintainer then decides whether to release the exact reviewed commit; no
+external audit approval is required.
 
 ### 3. Create the annotated tag and draft release
 
-Fetch `main`, identify the exact reviewed commit, and verify the version again:
+Fetch `main` and set `TARGET` to the final merged commit shown by the release
+preparation pull request, not merely a newer `main` tip. Check out that exact
+commit and verify the version again:
 
 ```bash
 git fetch origin main
-TARGET="$(git rev-parse origin/main)"
+TARGET="<exact-merged-release-commit>"
+test "$(git cat-file -t "$TARGET")" = commit
+git merge-base --is-ancestor "$TARGET" origin/main
+git switch --detach "$TARGET"
+
 VERSION="$(cargo metadata --locked --no-deps --format-version 1 |
   jq -er '.packages[] | select(.name == "axum-observability") | .version')"
 
 test "$(git rev-parse HEAD)" = "$TARGET"
 test -z "$(git status --porcelain)"
 ```
+
+Confirm that no remote tag, GitHub Release, or crates.io record already exists
+for the version before creating release state.
 
 Create and push an annotated tag at that exact commit:
 
@@ -169,7 +210,8 @@ git push origin "v$VERSION"
 ```
 
 Do not use a lightweight tag. The release workflow deliberately checks the Git
-object type before requesting a publisher token.
+object type before requesting a publisher token. After pushing the tag, treat
+it as immutable; never move or reuse it.
 
 Create a draft GitHub Release from the existing tag:
 
@@ -192,7 +234,8 @@ notes, stable-release status, and **Latest** selection before publishing.
 
 ### 4. Publish and monitor
 
-Publish the unchanged stable draft and explicitly preserve its Latest label:
+After reviewing the draft, publish it unchanged and explicitly preserve its
+Latest label. This manual action authorizes package publication:
 
 ```bash
 gh release edit "v$VERSION" --draft=false --latest
@@ -219,7 +262,8 @@ Check the GitHub Release and annotated tag:
 gh release view "v$VERSION" \
   --json tagName,name,url,isDraft,isPrerelease,publishedAt,targetCommitish
 
-gh api "repos/janisto/axum-observability/git/ref/tags/v$VERSION" \
+gh api \
+  "repos/janisto/axum-observability/git/ref/tags/v$VERSION" \
   --jq '.object.type + " " + .object.sha'
 ```
 
@@ -231,7 +275,8 @@ TAG_OBJECT="$(gh api \
   "repos/janisto/axum-observability/git/ref/tags/v$VERSION" \
   --jq .object.sha)"
 
-gh api "repos/janisto/axum-observability/git/tags/$TAG_OBJECT" \
+gh api \
+  "repos/janisto/axum-observability/git/tags/$TAG_OBJECT" \
   --jq '.object.type + " " + .object.sha'
 ```
 
@@ -251,7 +296,8 @@ Download the public archive, compare it with the registry checksum, and inspect
 its file set:
 
 ```bash
-ARCHIVE="/tmp/axum-observability-$VERSION.crate"
+ARCHIVE_DIR="$(mktemp -d)"
+ARCHIVE="$ARCHIVE_DIR/axum-observability-$VERSION.crate"
 METADATA="$(curl -fsSL \
   "https://crates.io/api/v1/crates/axum-observability/$VERSION")"
 CHECKSUM="$(printf '%s' "$METADATA" | jq -er .version.checksum)"
@@ -291,8 +337,8 @@ Finally, verify that:
 
 - **OIDC authentication fails:** Verify the crates.io trusted publisher's
   case-sensitive owner, repository, workflow filename, Environment, and owner
-  ID. Confirm that the job runs on GitHub-hosted infrastructure with job-level
-  `id-token: write`. Do not add a token fallback.
+  ID. Confirm that the job runs on GitHub-hosted infrastructure and the
+  workflow grants `id-token: write`. Do not add a token fallback.
 - **The workflow fails before upload:** First confirm that crates.io has no
   version record. A purely transient run may be retried against the unchanged
   release and tag. A source, metadata, or workflow correction requires a new

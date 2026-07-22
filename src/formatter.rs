@@ -1,4 +1,4 @@
-use std::{fmt, io, io::Write};
+use std::{fmt, io, io::Write, sync::Mutex, time::Duration};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -9,21 +9,36 @@ use tracing_subscriber::{Layer, fmt::MakeWriter, layer::Context, registry::Looku
 use crate::FieldConvention;
 
 /// A composable newline-delimited JSON `tracing` layer.
+///
+/// Each event is serialized as one compact JSON object followed by LF and
+/// passed to the configured writer as one complete buffer.
+///
+/// Construct this layer through [`crate::ObservabilityConfig::json_layer`]
+/// after finalizing the configuration, then use that same unchanged value for
+/// the middleware. The layer snapshots the field convention when constructed;
+/// later builder calls create a different configuration and do not update it.
+/// The v1 direct constructor is intentionally unavailable:
+///
+/// ```compile_fail
+/// use axum_observability::{FieldConvention, JsonLayer};
+///
+/// let _ = JsonLayer::new(std::io::sink(), FieldConvention::Generic);
+/// ```
 #[must_use]
 pub struct JsonLayer<W> {
     writer: W,
     field_convention: FieldConvention,
     log_internal_errors: bool,
+    record_write_lock: Mutex<()>,
 }
 
 impl<W> JsonLayer<W> {
-    /// Creates a JSON layer using the supplied writer and field convention.
-    #[must_use = "the JSON layer must be installed on a subscriber"]
-    pub const fn new(writer: W, field_convention: FieldConvention) -> Self {
+    pub(crate) const fn from_convention(writer: W, field_convention: FieldConvention) -> Self {
         Self {
             writer,
             field_convention,
             log_internal_errors: true,
+            record_write_lock: Mutex::new(()),
         }
     }
 
@@ -64,7 +79,11 @@ where
         id: &tracing::span::Id,
         context: Context<'_, S>,
     ) {
-        if attributes.metadata().target() != "axum_observability::request" {
+        let metadata = attributes.metadata();
+        if metadata.target() != "axum_observability::request"
+            || metadata.module_path() != Some("axum_observability::middleware")
+            || metadata.name() != "request"
+        {
             return;
         }
         let mut visitor = JsonVisitor::default();
@@ -78,9 +97,11 @@ where
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
-        let access_record = visitor
-            .fields
-            .remove("obs.record")
+        let trusted_access_callsite = event.metadata().target() == "axum_observability::access"
+            && event.metadata().module_path() == Some("axum_observability::middleware");
+        let access_record = trusted_access_callsite
+            .then(|| visitor.fields.remove("obs.record"))
+            .flatten()
             .and_then(|value| value.as_str().map(str::to_owned))
             .and_then(|value| serde_json::from_str::<Value>(&value).ok());
 
@@ -95,7 +116,7 @@ where
 
         let mut output = Map::new();
         for (key, value) in visitor.fields {
-            if !is_event_reserved(&key) {
+            if !is_event_reserved(&key, self.field_convention) {
                 output.insert(key, value);
             }
         }
@@ -140,6 +161,10 @@ where
             }
         };
         line.push(b'\n');
+        let _record_guard = self
+            .record_write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut writer = self.writer.make_writer_for(event.metadata());
         if let Err(error) = writer.write_all(&line) {
             let _ = self.report_internal_failure(InternalFailure::Write(error.kind()));
@@ -224,7 +249,7 @@ fn merge_access_record(
 
     if let Some(Value::Object(fields)) = enrichment {
         for (key, value) in fields {
-            if !is_reserved(&key) {
+            if !is_access_reserved(&key, convention) {
                 output.insert(key, value);
             }
         }
@@ -237,13 +262,43 @@ fn merge_access_record(
         copy_as(output, &mut http_request, "status", "status");
         copy_as(output, &mut http_request, "peer_ip", "remoteIp");
         copy_as(output, &mut http_request, "user_agent", "userAgent");
-        if let Some(duration) = output.get("duration_ms").and_then(Value::as_f64) {
-            http_request.insert(
-                "latency".to_owned(),
-                json!(format!("{}s", duration / 1_000.0)),
-            );
+        if let Some(latency) = output.get("duration_ms").and_then(gcp_latency) {
+            http_request.insert("latency".to_owned(), Value::String(latency));
         }
         output.insert("httpRequest".to_owned(), Value::Object(http_request));
+    }
+}
+
+fn gcp_latency(value: &Value) -> Option<String> {
+    const MAX_MILLISECONDS_EXCLUSIVE: u64 = 315_576_000_001_000;
+    const MAX_MILLISECONDS_EXCLUSIVE_F64: f64 = 315_576_000_001_000.0;
+    if let Some(milliseconds) = value.as_u64() {
+        if milliseconds >= MAX_MILLISECONDS_EXCLUSIVE {
+            return None;
+        }
+        let seconds = milliseconds / 1_000;
+        let nanos = (milliseconds % 1_000) * 1_000_000;
+        return Some(format_gcp_duration(seconds, nanos));
+    }
+    let milliseconds = value.as_f64()?;
+    if !(0.0..MAX_MILLISECONDS_EXCLUSIVE_F64).contains(&milliseconds) {
+        return None;
+    }
+    let duration = Duration::try_from_secs_f64(milliseconds / 1_000.0).ok()?;
+    let seconds = duration.as_secs();
+    let nanos = u64::from(duration.subsec_nanos());
+    Some(format_gcp_duration(seconds, nanos))
+}
+
+fn format_gcp_duration(seconds: u64, nanos: u64) -> String {
+    if nanos == 0 {
+        format!("{seconds}s")
+    } else if nanos.is_multiple_of(1_000_000) {
+        format!("{seconds}.{:03}s", nanos / 1_000_000)
+    } else if nanos.is_multiple_of(1_000) {
+        format!("{seconds}.{:06}s", nanos / 1_000)
+    } else {
+        format!("{seconds}.{nanos:09}s")
     }
 }
 
@@ -308,18 +363,33 @@ fn is_request_field(key: &str) -> bool {
             | "parent_id"
             | "trace_flags"
             | "trace_sampled"
+            | "trace_id_random"
     )
 }
 
-fn is_reserved(key: &str) -> bool {
+fn is_event_reserved(key: &str, convention: FieldConvention) -> bool {
     is_request_field(key)
+        || matches!(key, "timestamp" | "target" | "obs.record")
+        || match convention {
+            FieldConvention::Generic => key == "level",
+            FieldConvention::Gcp => matches!(
+                key,
+                "severity"
+                    | "logging.googleapis.com/trace"
+                    | "logging.googleapis.com/trace_sampled"
+            ),
+            FieldConvention::Aws => matches!(key, "level" | "xray_trace_id"),
+            FieldConvention::Azure => {
+                matches!(key, "level" | "operation_Id" | "operation_ParentId")
+            }
+        }
+}
+
+fn is_access_reserved(key: &str, convention: FieldConvention) -> bool {
+    is_event_reserved(key, convention)
         || matches!(
             key,
-            "timestamp"
-                | "level"
-                | "severity"
-                | "target"
-                | "message"
+            "message"
                 | "method"
                 | "path"
                 | "path_template"
@@ -330,32 +400,8 @@ fn is_reserved(key: &str) -> bool {
                 | "user_agent"
                 | "terminal_reason"
                 | "error"
-                | "httpRequest"
-                | "logging.googleapis.com/trace"
-                | "logging.googleapis.com/trace_sampled"
-                | "xray_trace_id"
-                | "operation_Id"
-                | "operation_ParentId"
-                | "obs.record"
         )
-}
-
-fn is_event_reserved(key: &str) -> bool {
-    is_request_field(key)
-        || matches!(
-            key,
-            "timestamp"
-                | "level"
-                | "severity"
-                | "target"
-                | "httpRequest"
-                | "logging.googleapis.com/trace"
-                | "logging.googleapis.com/trace_sampled"
-                | "xray_trace_id"
-                | "operation_Id"
-                | "operation_ParentId"
-                | "obs.record"
-        )
+        || convention == FieldConvention::Gcp && key == "httpRequest"
 }
 
 #[derive(Default)]
@@ -403,11 +449,33 @@ impl Visit for JsonVisitor {
 #[cfg(test)]
 mod tests {
     use serde::{Serialize, Serializer};
+    use serde_json::{Map, json};
     use time::{OffsetDateTime, UtcOffset};
 
-    use super::{InternalFailure, format_timestamp, internal_diagnostic, serialize_json};
+    use super::{
+        InternalFailure, format_timestamp, gcp_latency, internal_diagnostic, merge_access_record,
+        serialize_json, validated_trace_id,
+    };
+    use crate::FieldConvention;
 
     struct SerializationFailure;
+
+    #[test]
+    fn provider_trace_id_validation_requires_exact_lowercase_nonzero_hex() {
+        for trace_id in [
+            "short".to_owned(),
+            "g".repeat(32),
+            "0".repeat(32),
+            "A".repeat(32),
+        ] {
+            let output = Map::from_iter([("trace_id".to_owned(), json!(trace_id))]);
+            assert_eq!(validated_trace_id(&output), None);
+        }
+
+        let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let output = Map::from_iter([("trace_id".to_owned(), json!(trace_id))]);
+        assert_eq!(validated_trace_id(&output).as_deref(), Some(trace_id));
+    }
 
     impl Serialize for SerializationFailure {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
@@ -440,10 +508,11 @@ mod tests {
         );
         assert!(!write.contains("request"));
 
-        let disabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic)
+        let disabled = crate::ObservabilityConfig::default()
+            .json_layer(std::io::sink())
             .log_internal_errors(false);
         assert!(!disabled.report_internal_failure(InternalFailure::Timestamp));
-        let enabled = crate::JsonLayer::new(std::io::sink(), crate::FieldConvention::Generic);
+        let enabled = crate::ObservabilityConfig::default().json_layer(std::io::sink());
         assert!(enabled.report_internal_failure(InternalFailure::Timestamp));
     }
 
@@ -467,5 +536,49 @@ mod tests {
         let diagnostic = internal_diagnostic(true, InternalFailure::Serialization)
             .expect("serialization diagnostic");
         assert!(!diagnostic.contains("secret serialization detail"));
+    }
+
+    #[test]
+    fn gcp_latency_formats_the_maximum_protobuf_duration_without_precision_loss() {
+        let mut output = Map::new();
+        let record = json!({
+            "method": "GET",
+            "duration_ms": 315_576_000_000_000_u64,
+            "enrichment": {}
+        })
+        .as_object()
+        .expect("object fixture")
+        .clone();
+        merge_access_record(&mut output, record, FieldConvention::Gcp);
+        assert_eq!(output["duration_ms"], json!(315_576_000_000_000_u64));
+        assert_eq!(output["httpRequest"]["latency"], "315576000000s");
+    }
+
+    #[test]
+    fn gcp_latency_preserves_fractional_and_near_limit_precision() {
+        assert_eq!(gcp_latency(&json!(10)).as_deref(), Some("0.010s"));
+        assert_eq!(gcp_latency(&json!(12.5)).as_deref(), Some("0.012500s"));
+        assert_eq!(gcp_latency(&json!(1_500)).as_deref(), Some("1.500s"));
+        assert_eq!(
+            gcp_latency(&json!(315_576_000_000_999_u64)).as_deref(),
+            Some("315576000000.999s")
+        );
+        assert_eq!(gcp_latency(&json!(-1.0)), None);
+    }
+
+    #[test]
+    fn gcp_latency_omits_provider_overflow_without_zeroing_portable_duration() {
+        let mut output = Map::new();
+        let record = json!({
+            "method": "GET",
+            "duration_ms": 315_576_000_001_000_u64,
+            "enrichment": {}
+        })
+        .as_object()
+        .expect("object fixture")
+        .clone();
+        merge_access_record(&mut output, record, FieldConvention::Gcp);
+        assert_eq!(output["duration_ms"], json!(315_576_000_001_000_u64));
+        assert!(output["httpRequest"].get("latency").is_none());
     }
 }

@@ -31,7 +31,8 @@ async fn emits_once_at_body_eof_with_final_status_and_non_negative_duration() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], 418);
     assert_eq!(records[0]["level"], "WARN");
-    assert_eq!(records[0]["duration_ms"], 0.0);
+    assert_eq!(records[0]["duration_ms"], 0);
+    assert!(records[0]["duration_ms"].is_u64());
     assert!(records[0].get("terminal_reason").is_none());
 }
 
@@ -77,7 +78,7 @@ async fn dropping_an_unread_response_emits_one_abnormal_terminal_record() {
     let records = capture.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], 200);
-    assert_eq!(records[0]["level"], "DEBUG");
+    assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
 }
 
@@ -215,7 +216,7 @@ async fn final_frame_completes_before_the_consumer_polls_again_or_drops() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn body_error_emits_once_with_controlled_error_information() {
+async fn body_error_emits_once_without_inventing_error_information() {
     let config = ObservabilityConfig::default().with_status_level_mapper(|_| tracing::Level::TRACE);
     let capture = Capture::default();
     let filtered = config
@@ -239,7 +240,7 @@ async fn body_error_emits_once_with_controlled_error_information() {
     assert_eq!(records[0]["status"], 200);
     assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "body_error");
-    assert_eq!(records[0]["error"], "response body failed");
+    assert!(records[0].get("error").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -265,7 +266,7 @@ async fn service_error_is_returned_and_emitted_once_at_error() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "service_error");
-    assert_eq!(records[0]["error"], "downstream service failed");
+    assert!(records[0].get("error").is_none());
     assert!(records[0].get("status").is_none());
 }
 
@@ -368,7 +369,7 @@ async fn finish_clock_panic_falls_back_to_zero_duration() {
         .await
         .expect("clock panic must not replace the response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(capture.records()[0]["duration_ms"], 0.0);
+    assert_eq!(capture.records()[0]["duration_ms"], 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -484,7 +485,7 @@ async fn dropping_an_unpolled_service_future_still_emits_once() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["level"], "WARN");
+    assert_eq!(records[0]["level"], "ERROR");
     assert_eq!(records[0]["terminal_reason"], "response_dropped");
     assert!(records[0].get("status").is_none());
 }

@@ -48,6 +48,13 @@ into human onboarding documentation.
 
 - Keep `plans/` ignored. Planning and mutation-campaign notes are local and
   must not ship in the crate or repository.
+- Keep compatible dependency requirements in `Cargo.toml`, exact repository
+  resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Never
+  edit the lockfile manually.
+- Keep Cargo CLI tools shared by local and hosted checks aligned between the
+  `Justfile` and workflows. Install them with `cargo install --locked` and do
+  not hard-code tool versions that Dependabot cannot maintain; CI-only tools
+  may remain workflow-only.
 - Preserve `#![forbid(unsafe_code)]`, the Rust 1.97.0 support line, and stable
   Rust APIs.
 - Do not add OpenTelemetry, a cloud SDK, a global subscriber, or logging of
@@ -85,17 +92,33 @@ into human onboarding documentation.
   version tags.
 - `just qa` must run `actionlint` and `zizmor --offline .` in addition to the
   repository's language checks.
+- Do not add standalone repository scripts, including under `.github`. Enforce
+  repository policy through the existing native test suite and tooling.
 - Keep `.github/zizmor.yml` aligned with the exact-tag policy and the
   one-day Dependabot cooldown.
 
 ## Releases
 
-- Prepare releases through a pull request titled `chore: prepare vX.Y.Z`.
+- Prepare releases from a same-repository source branch named
+  `release/prepare-vX.Y.Z` through a pull request titled
+  `chore: prepare vX.Y.Z` that targets `main`.
+- Use the `release/` namespace only for release preparation branches.
+- The conditional `Consumer image build` job on a release preparation pull
+  request is a build-only packaging and integration diagnostic. It does not run
+  the image, validate emitted logs, or approve a release.
+- For local image-build diagnosis, run
+  `just e2e-image observability-e2e-local:manual`. The Justfile prefers Podman
+  and falls back to Docker.
+- Keep `e2e/README.md` self-contained as the public consumer-image interface.
+  Independent audits are optional and informational; they never approve or
+  block publication.
 - Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, rustdoc, examples, and
   public documentation together when applicable.
 - Run `just qa`, `cargo publish --dry-run --locked`, and `git diff --check`.
-- Merge a green pull request to `main`, then release the exact reviewed commit
-  with an annotated tag `vX.Y.Z`.
+- Merge a green pull request to `main`, create the annotated `vX.Y.Z` tag for
+  the exact reviewed `main` commit, then publish the reviewed GitHub Release as
+  the manual package-publication authorization; no external approval is
+  required.
 - When drafting a stable GitHub Release, use **Generate release notes** and mark
   it as **Latest**. Edit the notes for accuracy and alignment with
   `CHANGELOG.md` before publishing.

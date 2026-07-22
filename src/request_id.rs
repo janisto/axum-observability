@@ -1,14 +1,19 @@
 use std::{error::Error, fmt, str::FromStr};
 
-/// A validated request identifier.
+/// A request identifier selected by the configured request-ID policy.
 ///
-/// Values contain between 1 and [`MAX_LEN`](Self::MAX_LEN) ASCII
-/// URI-unreserved bytes.
+/// Values created through [`parse`](Self::parse), [`FromStr`], or [`TryFrom`]
+/// satisfy the baseline grammar: 1 to [`MAX_LEN`](Self::MAX_LEN) ASCII
+/// URI-unreserved bytes. Middleware can also construct this type for one
+/// native-safe caller value admitted by a custom validator; such a value is not
+/// guaranteed to satisfy the baseline grammar.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(Box<str>);
 
 impl RequestId {
-    /// Maximum accepted request-ID length in bytes.
+    /// Maximum request-ID length accepted by the baseline parser, in bytes.
+    ///
+    /// A caller value admitted by a custom middleware validator can be longer.
     pub const MAX_LEN: usize = 128;
 
     /// Parses and validates a request identifier.
@@ -32,11 +37,28 @@ impl RequestId {
         Ok(Self(value.into()))
     }
 
+    pub(crate) fn from_native_header(value: &str) -> Option<Self> {
+        native_field_content(value).then(|| Self(value.into()))
+    }
+
     /// Returns the validated identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+pub(crate) fn native_field_content(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || matches!(bytes.first(), Some(b' ' | b'\t'))
+        || matches!(bytes.last(), Some(b' ' | b'\t'))
+    {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| *byte == b'\t' || *byte >= 0x20 && *byte != 0x7f)
 }
 
 impl AsRef<str> for RequestId {
@@ -132,7 +154,15 @@ fn validate(value: &str) -> Result<(), InvalidRequestId> {
 mod tests {
     use std::str::FromStr as _;
 
-    use super::{InvalidRequestId, RequestId};
+    use super::{InvalidRequestId, RequestId, native_field_content};
+
+    #[test]
+    fn native_field_content_admits_internal_htab_but_rejects_controls() {
+        assert!(native_field_content("tenant\trequest"));
+        for value in ["tenant\0request", "tenant\x1frequest", "tenant\x7frequest"] {
+            assert!(!native_field_content(value), "admitted {value:?}");
+        }
+    }
 
     #[test]
     fn accepts_exact_length_boundaries_and_conversion_forms() {

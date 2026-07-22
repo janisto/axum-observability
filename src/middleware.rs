@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "peer-ip")]
@@ -29,11 +29,13 @@ use uuid::Uuid;
 
 use crate::{
     FieldConvention, JsonLayer, OperationId, RequestContext, RequestId, TraceContext,
-    trace_context::{parse_traceparent, parse_tracestate},
+    TraceContextLevel,
+    request_id::native_field_content,
+    trace_context::{parse_traceparent_with_level, parse_tracestate_with_level},
 };
 
 type Generator = Arc<dyn Fn() -> Option<RequestId> + Send + Sync>;
-type Validator = Arc<dyn Fn(&RequestId) -> bool + Send + Sync>;
+type Validator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type LevelMapper = Arc<dyn Fn(StatusCode) -> Level + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + Sync>;
@@ -47,6 +49,7 @@ type Enricher = Arc<dyn Fn(&RequestContext) -> BTreeMap<String, Value> + Send + 
 )]
 pub struct ObservabilityConfig {
     pub(crate) field_convention: FieldConvention,
+    trace_context_level: TraceContextLevel,
     request_id_header: HeaderName,
     response_header: bool,
     raw_path: bool,
@@ -54,7 +57,7 @@ pub struct ObservabilityConfig {
     peer_ip: bool,
     user_agent: bool,
     generator: Generator,
-    validator: Validator,
+    validator: Option<Validator>,
     level_mapper: LevelMapper,
     clock: Clock,
     enricher: Enricher,
@@ -65,6 +68,7 @@ impl fmt::Debug for ObservabilityConfig {
         let mut debug = formatter.debug_struct("ObservabilityConfig");
         debug
             .field("field_convention", &self.field_convention)
+            .field("trace_context_level", &self.trace_context_level)
             .field("request_id_header", &self.request_id_header)
             .field("response_header", &self.response_header)
             .field("raw_path", &self.raw_path);
@@ -80,6 +84,7 @@ impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             field_convention: FieldConvention::Generic,
+            trace_context_level: TraceContextLevel::Level1,
             request_id_header: HeaderName::from_static("x-request-id"),
             response_header: true,
             raw_path: false,
@@ -87,7 +92,7 @@ impl Default for ObservabilityConfig {
             peer_ip: false,
             user_agent: false,
             generator: Arc::new(|| Some(random_request_id())),
-            validator: Arc::new(|_| true),
+            validator: None,
             level_mapper: Arc::new(default_level),
             clock: Arc::new(Instant::now),
             enricher: Arc::new(|_| BTreeMap::new()),
@@ -101,6 +106,19 @@ impl ObservabilityConfig {
     pub fn with_field_convention(mut self, convention: FieldConvention) -> Self {
         self.field_convention = convention;
         self
+    }
+
+    /// Selects the W3C Trace Context level used for inbound requests.
+    #[must_use = "configuration builders return a new value"]
+    pub const fn with_trace_context_level(mut self, level: TraceContextLevel) -> Self {
+        self.trace_context_level = level;
+        self
+    }
+
+    /// Returns the resolved W3C Trace Context level.
+    #[must_use]
+    pub const fn trace_context_level(&self) -> TraceContextLevel {
+        self.trace_context_level
     }
 
     /// Sets the request and response correlation header name.
@@ -133,7 +151,11 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Enables or disables query-free raw path capture.
+    /// Enables or disables exact query-free raw path capture.
+    ///
+    /// Every nonempty path component exposed by
+    /// [`Uri::path`](axum::http::Uri::path) is retained without applying a
+    /// second path grammar.
     ///
     /// Enabling this can record identifying data and changes the application's
     /// privacy posture. Query strings are never captured.
@@ -175,14 +197,14 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Adds a request ID validator that may narrow, but cannot weaken, the
-    /// baseline URI-unreserved policy.
+    /// Adds an application validator for one runtime-valid caller header.
+    /// Generated identifiers always retain the package's default grammar.
     #[must_use = "configuration builders return a new value"]
     pub fn with_request_id_validator(
         mut self,
-        validator: impl Fn(&RequestId) -> bool + Send + Sync + 'static,
+        validator: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.validator = Arc::new(validator);
+        self.validator = Some(Arc::new(validator));
         self
     }
 
@@ -221,18 +243,21 @@ impl ObservabilityConfig {
     /// Creates a composable JSON layer using this configuration's field convention.
     #[must_use = "configuration builders return a new value"]
     pub fn json_layer<W>(&self, writer: W) -> JsonLayer<W> {
-        JsonLayer::new(writer, self.field_convention)
+        JsonLayer::from_convention(writer, self.field_convention)
     }
 
-    fn accepts_request_id(&self, value: &RequestId) -> bool {
-        catch_unwind(AssertUnwindSafe(|| (self.validator)(value))).unwrap_or(false)
+    fn accepts_request_id(&self, value: &str) -> bool {
+        self.validator.as_ref().map_or_else(
+            || RequestId::parse(value).is_ok(),
+            |validator| catch_unwind(AssertUnwindSafe(|| validator(value))).unwrap_or(false),
+        )
     }
 
     fn generate_request_id(&self) -> RequestId {
-        let generated = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
+        if let Some(value) = catch_unwind(AssertUnwindSafe(|| (self.generator)()))
             .ok()
-            .flatten();
-        if let Some(value) = generated.filter(|value| self.accepts_request_id(value)) {
+            .flatten()
+        {
             return value;
         }
 
@@ -295,17 +320,13 @@ where
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
         let request_id = select_request_id(request.headers_mut(), &self.config);
-        let trace_context = select_trace_context(request.headers());
+        let trace_context =
+            select_trace_context(request.headers(), self.config.trace_context_level);
         let request_context = RequestContext::new(request_id, trace_context);
         let metadata = RequestMetadata::from_request(&request, &self.config);
         let span = request_span(&request_context);
         let started = catch_unwind(AssertUnwindSafe(|| (self.config.clock)()))
             .unwrap_or_else(|_| Instant::now());
-        let enrichment = catch_unwind(AssertUnwindSafe(|| {
-            (self.config.enricher)(&request_context)
-        }))
-        .unwrap_or_default();
-
         request.extensions_mut().insert(request_context.clone());
         let future = {
             let _entered = span.enter();
@@ -319,7 +340,6 @@ where
             started,
             config.clone(),
             guard_span,
-            enrichment,
         );
 
         Box::pin(
@@ -359,11 +379,12 @@ fn select_request_id(headers: &mut HeaderMap, config: &ObservabilityConfig) -> R
     let mut values = headers.get_all(&config.request_id_header).iter();
     let first = values
         .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| RequestId::parse(value).ok());
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok());
     let request_id = if values.next().is_none() {
         first
+            .filter(|value| native_field_content(value))
             .filter(|value| config.accepts_request_id(value))
+            .and_then(RequestId::from_native_header)
             .unwrap_or_else(|| config.generate_request_id())
     } else {
         config.generate_request_id()
@@ -379,35 +400,53 @@ fn random_request_id() -> RequestId {
         .expect("UUID simple formatting satisfies the request-ID contract")
 }
 
-fn select_trace_context(headers: &HeaderMap) -> Option<TraceContext> {
+fn select_trace_context(headers: &HeaderMap, level: TraceContextLevel) -> Option<TraceContext> {
     let mut parents = headers.get_all("traceparent").iter();
-    let first = parents.next()?.to_str().ok()?;
+    let first = parents.next()?.as_bytes();
     if parents.next().is_some() {
         return None;
     }
-    let trace = parse_traceparent(first)?;
+    let trace = parse_traceparent_with_level(first, level)?;
 
     let states = headers
         .get_all("tracestate")
         .iter()
         .map(HeaderValue::to_str)
         .collect::<Result<Vec<_>, _>>();
-    let tracestate = states.ok().and_then(parse_tracestate);
+    let tracestate = states
+        .ok()
+        .and_then(|values| parse_tracestate_with_level(values, level));
     Some(trace.with_tracestate(tracestate))
 }
 
 fn request_span(context: &RequestContext) -> Span {
     if let Some(trace) = context.trace_context() {
-        tracing::info_span!(
-            target: "axum_observability::request",
-            "request",
-            request_id = %context.request_id(),
-            correlation_id = context.correlation_id(),
-            trace_id = trace.trace_id(),
-            parent_id = trace.parent_id(),
-            trace_flags = u64::from(trace.flags()),
-            trace_sampled = trace.sampled(),
-        )
+        let flags = format!("{:02x}", trace.flags());
+        if let Some(random) = trace.trace_id_random() {
+            tracing::info_span!(
+                target: "axum_observability::request",
+                "request",
+                request_id = %context.request_id(),
+                correlation_id = context.correlation_id(),
+                trace_id = trace.trace_id(),
+                parent_id = trace.parent_id(),
+                trace_flags = flags.as_str(),
+                trace_sampled = trace.sampled(),
+                trace_id_random = random,
+            )
+        } else {
+            tracing::info_span!(
+                target: "axum_observability::request",
+                "request",
+                request_id = %context.request_id(),
+                correlation_id = context.correlation_id(),
+                trace_id = trace.trace_id(),
+                parent_id = trace.parent_id(),
+                trace_flags = flags.as_str(),
+                trace_sampled = trace.sampled(),
+                trace_id_random = tracing::field::Empty,
+            )
+        }
     } else {
         tracing::info_span!(
             target: "axum_observability::request",
@@ -418,6 +457,7 @@ fn request_span(context: &RequestContext) -> Span {
             parent_id = tracing::field::Empty,
             trace_flags = tracing::field::Empty,
             trace_sampled = tracing::field::Empty,
+            trace_id_random = tracing::field::Empty,
         )
     }
 }
@@ -446,11 +486,14 @@ impl RequestMetadata {
     fn from_request(request: &Request<Body>, config: &ObservabilityConfig) -> Self {
         Self {
             method: request.method().to_string(),
-            path: config.raw_path.then(|| request.uri().path().to_owned()),
+            path: config
+                .raw_path
+                .then(|| canonical_raw_path(request.uri().path()))
+                .flatten(),
             path_template: request
                 .extensions()
                 .get::<MatchedPath>()
-                .map(|path| path.as_str().to_owned()),
+                .and_then(|path| canonical_route_template(path.as_str())),
             operation_id: request
                 .extensions()
                 .get::<OperationId>()
@@ -460,6 +503,72 @@ impl RequestMetadata {
                 .user_agent
                 .then(|| exactly_one_header(request.headers(), &USER_AGENT))
                 .flatten(),
+        }
+    }
+}
+
+fn canonical_raw_path(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn canonical_route_template(native: &str) -> Option<String> {
+    (!native.is_empty()).then(|| native.to_owned())
+}
+
+#[cfg(test)]
+mod route_template_tests {
+    use super::{canonical_raw_path, canonical_route_template};
+
+    #[test]
+    fn canonical_raw_path_preserves_every_nonempty_native_path_component() {
+        for (raw, expected) in [
+            ("/", Some("/")),
+            ("/objects/a%2Fb/%E2%9C%93", Some("/objects/a%2Fb/%E2%9C%93")),
+            ("objects/no-leading-slash", Some("objects/no-leading-slash")),
+            ("*", Some("*")),
+            ("/objects/bad%2", Some("/objects/bad%2")),
+            ("/objects/bad%GG", Some("/objects/bad%GG")),
+            ("/objects/bad%2G", Some("/objects/bad%2G")),
+            ("/objects/bad%G2", Some("/objects/bad%G2")),
+            ("/a%20%G2", Some("/a%20%G2")),
+            ("", None),
+        ] {
+            assert_eq!(canonical_raw_path(raw).as_deref(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn canonical_route_template_preserves_nonempty_authoritative_matched_paths() {
+        for (native, expected) in [
+            ("/health".to_owned(), Some("/health".to_owned())),
+            (
+                "/items/{item_id}".to_owned(),
+                Some("/items/{item_id}".to_owned()),
+            ),
+            (
+                "/files/{*path}".to_owned(),
+                Some("/files/{*path}".to_owned()),
+            ),
+            (
+                format!("/items/{{{}}}", "a".repeat(64)),
+                Some(format!("/items/{{{}}}", "a".repeat(64))),
+            ),
+            (
+                format!("/items/{{{}}}", "a".repeat(65)),
+                Some(format!("/items/{{{}}}", "a".repeat(65))),
+            ),
+            (
+                "/items/{0item}".to_owned(),
+                Some("/items/{0item}".to_owned()),
+            ),
+            (
+                "/items/{item-id}".to_owned(),
+                Some("/items/{item-id}".to_owned()),
+            ),
+            ("/literal*star".to_owned(), Some("/literal*star".to_owned())),
+            (String::new(), None),
+        ] {
+            assert_eq!(canonical_route_template(&native), expected, "{native}");
         }
     }
 }
@@ -476,14 +585,20 @@ fn peer_ip(request: &Request<Body>, config: &ObservabilityConfig) -> Option<Stri
 }
 
 #[cfg(not(feature = "peer-ip"))]
-fn peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<String> {
+fn unavailable_peer_ip(_request: &Request<Body>, _config: &ObservabilityConfig) -> Option<String> {
     None
 }
 
+#[cfg(not(feature = "peer-ip"))]
+use unavailable_peer_ip as peer_ip;
+
 fn exactly_one_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
     let mut values = headers.get_all(name).iter();
-    let first = values.next()?.to_str().ok()?;
-    values.next().is_none().then(|| first.to_owned())
+    let first = std::str::from_utf8(values.next()?.as_bytes()).ok()?;
+    if values.next().is_some() || !native_field_content(first) {
+        return None;
+    }
+    Some(first.to_owned())
 }
 
 #[derive(Debug, Serialize)]
@@ -495,9 +610,11 @@ pub(crate) struct AccessRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    trace_flags: Option<u8>,
+    trace_flags: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_sampled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id_random: Option<bool>,
     method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -507,15 +624,13 @@ pub(crate) struct AccessRecord {
     operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
-    duration_ms: f64,
+    duration_ms: DurationMilliseconds,
     #[serde(skip_serializing_if = "Option::is_none")]
     peer_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
     enrichment: BTreeMap<String, Value>,
 }
 
@@ -526,7 +641,6 @@ struct TerminalState {
     status: Option<StatusCode>,
     config: ObservabilityConfig,
     span: Span,
-    enrichment: BTreeMap<String, Value>,
 }
 
 struct TerminalGuard {
@@ -542,12 +656,12 @@ enum TerminalOutcome {
 }
 
 impl TerminalOutcome {
-    const fn record_fields(self) -> (Option<&'static str>, Option<&'static str>) {
+    const fn terminal_reason(self) -> Option<&'static str> {
         match self {
-            Self::Completed => (None, None),
-            Self::ServiceError => (Some("service_error"), Some("downstream service failed")),
-            Self::BodyError => (Some("body_error"), Some("response body failed")),
-            Self::ResponseDropped => (Some("response_dropped"), None),
+            Self::Completed => None,
+            Self::ServiceError => Some("service_error"),
+            Self::BodyError => Some("body_error"),
+            Self::ResponseDropped => Some("response_dropped"),
         }
     }
 }
@@ -559,7 +673,6 @@ impl TerminalGuard {
         started: Instant,
         config: ObservabilityConfig,
         span: Span,
-        enrichment: BTreeMap<String, Value>,
     ) -> Self {
         Self {
             state: Some(TerminalState {
@@ -569,7 +682,6 @@ impl TerminalGuard {
                 status: None,
                 config,
                 span,
-                enrichment,
             }),
         }
     }
@@ -598,30 +710,6 @@ impl TerminalGuard {
         let Some(state) = self.state.take() else {
             return;
         };
-        let finished =
-            catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
-        let duration = finished.saturating_duration_since(state.started);
-        let trace = state.request_context.trace_context();
-        let (terminal_reason, error) = outcome.record_fields();
-        let record = AccessRecord {
-            request_id: state.request_context.request_id().as_str().to_owned(),
-            correlation_id: state.request_context.correlation_id().to_owned(),
-            trace_id: trace.map(|trace| trace.trace_id().to_owned()),
-            parent_id: trace.map(|trace| trace.parent_id().to_owned()),
-            trace_flags: trace.map(TraceContext::flags),
-            trace_sampled: trace.map(TraceContext::sampled),
-            method: state.metadata.method,
-            path: state.metadata.path,
-            path_template: state.metadata.path_template,
-            operation_id: state.metadata.operation_id,
-            status: state.status.map(|status| status.as_u16()),
-            duration_ms: duration.as_secs_f64() * 1_000.0,
-            peer_ip: state.metadata.peer_ip,
-            user_agent: state.metadata.user_agent,
-            terminal_reason: terminal_reason.map(str::to_owned),
-            error: error.map(str::to_owned),
-            enrichment: state.enrichment,
-        };
         let mapped_level = |status| {
             catch_unwind(AssertUnwindSafe(|| (state.config.level_mapper)(status)))
                 .unwrap_or_else(|_| default_level(status))
@@ -630,11 +718,75 @@ impl TerminalGuard {
             TerminalOutcome::Completed => {
                 mapped_level(state.status.expect("completed response has a status"))
             }
-            TerminalOutcome::ServiceError | TerminalOutcome::BodyError => Level::ERROR,
-            TerminalOutcome::ResponseDropped => state.status.map_or(Level::WARN, mapped_level),
+            TerminalOutcome::ServiceError
+            | TerminalOutcome::BodyError
+            | TerminalOutcome::ResponseDropped => Level::ERROR,
+        };
+        let finished =
+            catch_unwind(AssertUnwindSafe(|| (state.config.clock)())).unwrap_or(state.started);
+        let duration = finished.saturating_duration_since(state.started);
+        let trace = state.request_context.trace_context();
+        let terminal_reason = outcome.terminal_reason();
+        let enrichment = catch_unwind(AssertUnwindSafe(|| {
+            (state.config.enricher)(&state.request_context)
+        }))
+        .unwrap_or_default();
+        let record = AccessRecord {
+            request_id: state.request_context.request_id().as_str().to_owned(),
+            correlation_id: state.request_context.correlation_id().to_owned(),
+            trace_id: trace.map(|trace| trace.trace_id().to_owned()),
+            parent_id: trace.map(|trace| trace.parent_id().to_owned()),
+            trace_flags: trace.map(|trace| format!("{:02x}", trace.flags())),
+            trace_sampled: trace.map(TraceContext::sampled),
+            trace_id_random: trace.and_then(TraceContext::trace_id_random),
+            method: state.metadata.method,
+            path: state.metadata.path,
+            path_template: state.metadata.path_template,
+            operation_id: state.metadata.operation_id,
+            status: state.status.map(|status| status.as_u16()),
+            duration_ms: duration_milliseconds(duration),
+            peer_ip: state.metadata.peer_ip,
+            user_agent: state.metadata.user_agent,
+            terminal_reason: terminal_reason.map(str::to_owned),
+            enrichment,
         };
         let serialized = serde_json::to_string(&record).expect("access record is serializable");
         state.span.in_scope(|| emit_access(level, &serialized));
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum DurationMilliseconds {
+    Integer(u128),
+    Fractional(f64),
+}
+
+fn duration_milliseconds(duration: Duration) -> DurationMilliseconds {
+    if duration.subsec_nanos().is_multiple_of(1_000_000) {
+        DurationMilliseconds::Integer(duration.as_millis())
+    } else {
+        DurationMilliseconds::Fractional(duration.as_secs_f64() * 1_000.0)
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::duration_milliseconds;
+
+    #[test]
+    fn portable_duration_is_not_clamped_by_a_provider_projection_range() {
+        let maximum = serde_json::to_value(duration_milliseconds(Duration::from_hours(87_660_000)))
+            .expect("serialize maximum duration");
+        let overflow =
+            serde_json::to_value(duration_milliseconds(Duration::from_secs(315_576_000_001)))
+                .expect("serialize overflow duration");
+        assert_eq!(maximum, json!(315_576_000_000_000_u64));
+        assert_eq!(overflow, json!(315_576_000_001_000_u64));
     }
 }
 

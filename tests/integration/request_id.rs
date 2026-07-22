@@ -147,7 +147,7 @@ async fn replaces_duplicate_ids_and_invokes_the_generator_once() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything() {
+async fn generator_failure_is_not_retried_and_falls_back_without_custom_validation() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let generator_attempts = attempts.clone();
     let config = ObservabilityConfig::default()
@@ -178,7 +178,7 @@ async fn generator_failure_falls_back_even_when_custom_policy_rejects_everything
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generator_none_and_validator_rejection_use_package_owned_ids() {
+async fn generator_none_falls_back_and_validator_applies_only_to_caller_input() {
     let none_config = ObservabilityConfig::default().with_request_id_generator(|| None);
     let none_app = Router::new()
         .route("/", get(context_handler))
@@ -213,7 +213,78 @@ async fn generator_none_and_validator_rejection_use_package_owned_ids() {
     let rejected_id = rejected_response.headers()["x-request-id"]
         .to_str()
         .expect("request ID text");
-    assert_ne!(rejected_id, "validator-rejected");
-    assert!(RequestId::parse(rejected_id).is_ok());
+    assert_eq!(rejected_id, "validator-rejected");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_validator_may_admit_native_safe_values_beyond_default_grammar() {
+    for request_id in [
+        "id:42".to_owned(),
+        "a".repeat(129),
+        "tenant request".to_owned(),
+        "tenant\trequest".to_owned(),
+        "tenant,request".to_owned(),
+    ] {
+        let config = ObservabilityConfig::default().with_request_id_validator(|_| true);
+        let capture = Capture::default();
+        let _guard = subscriber(&config, capture).set_default();
+        let app = Router::new()
+            .route("/", get(context_handler))
+            .layer(ObservabilityLayer::new(config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", request_id.as_str())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let selected_header = response.headers()["x-request-id"]
+            .to_str()
+            .expect("request ID text")
+            .to_owned();
+        assert_eq!(selected_header, request_id);
+        let body = to_bytes(response.into_body(), 2_048)
+            .await
+            .expect("extractor response body");
+        let expected_body = format!("{request_id}|{request_id}");
+        assert_eq!(
+            body,
+            expected_body.as_bytes(),
+            "typed RequestContext must expose the custom-policy value"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_validator_cannot_admit_edge_whitespace() {
+    let validator_calls = Arc::new(AtomicUsize::new(0));
+    for request_id in [" tenant", "tenant ", "\ttenant", "tenant\t"] {
+        let calls = validator_calls.clone();
+        let config = ObservabilityConfig::default()
+            .with_request_id_validator(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+            .with_request_id_generator(|| RequestId::parse("generated-edge").ok());
+        let app = Router::new()
+            .route("/", get(context_handler))
+            .layer(ObservabilityLayer::new(config));
+        let value = HeaderValue::from_bytes(request_id.as_bytes()).expect("native header value");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.headers()["x-request-id"], "generated-edge");
+    }
+    assert_eq!(validator_calls.load(Ordering::SeqCst), 0);
 }

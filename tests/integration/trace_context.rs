@@ -19,7 +19,7 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         .header("x-request-id", "request-42")
         .header(
             "traceparent",
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
         )
         .header("tracestate", "vendor=value")
         .body(Body::empty())
@@ -33,6 +33,9 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
         assert_eq!(record["request_id"], "request-42");
         assert_eq!(record["correlation_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(record["severity"], "INFO");
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert!(record.get("trace_id_random").is_none());
         assert_eq!(
             record["logging.googleapis.com/trace"],
             "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -49,8 +52,47 @@ async fn valid_trace_context_correlates_application_and_access_events_without_sp
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn explicit_level_two_projects_random_flag_and_uses_level_two_tracestate_grammar() {
+    async fn handler(context: RequestContext) -> StatusCode {
+        let trace = context.trace_context().expect("trace context");
+        assert_eq!(trace.trace_context_level(), TraceContextLevel::Level2);
+        assert_eq!(trace.trace_id_random(), Some(true));
+        assert_eq!(trace.tracestate(), Some("tenant@system@edge=value"));
+        tracing::info!("application event");
+        StatusCode::NO_CONTENT
+    }
+
+    let config = ObservabilityConfig::default().with_trace_context_level(TraceContextLevel::Level2);
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(handler))
+        .layer(ObservabilityLayer::new(config));
+    let request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "level-two-request")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+        )
+        .header("tracestate", "tenant@system@edge=value")
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    to_bytes(response.into_body(), 1_024).await.expect("body");
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert_eq!(record["trace_id_random"], true);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn future_traceparent_extension_is_accepted_but_never_logged() {
-    let config = ObservabilityConfig::default();
+    let config = ObservabilityConfig::default().with_trace_context_level(TraceContextLevel::Level2);
     let capture = Capture::default();
     let _guard = subscriber(&config, capture.clone()).set_default();
     let app = Router::new()
@@ -61,7 +103,7 @@ async fn future_traceparent_extension_is_accepted_but_never_logged() {
         .header("x-request-id", "future-request")
         .header(
             "traceparent",
-            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-opaque-secret",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03-opaque-secret",
         )
         .body(Body::empty())
         .expect("request");
@@ -69,8 +111,46 @@ async fn future_traceparent_extension_is_accepted_but_never_logged() {
     let response = app.oneshot(request).await.expect("response");
     let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "future-request|4bf92f3577b34da6a3ce929d0e0e4736");
-    let output = serde_json::to_string(&capture.records()).expect("records serialize");
+    let records = capture.records();
+    for record in &records {
+        assert_eq!(record["trace_flags"], "03");
+        assert_eq!(record["trace_sampled"], true);
+        assert!(record.get("trace_id_random").is_none());
+    }
+    let output = serde_json::to_string(&records).expect("records serialize");
     assert!(!output.contains("opaque-secret"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn future_obs_text_suffix_is_accepted_at_the_axum_header_boundary() {
+    let config = ObservabilityConfig::default();
+    let capture = Capture::default();
+    let _guard = subscriber(&config, capture.clone()).set_default();
+    let app = Router::new()
+        .route("/", get(context_handler))
+        .layer(ObservabilityLayer::new(config));
+    let mut request = Request::builder()
+        .uri("/")
+        .header("x-request-id", "obs-text-request")
+        .body(Body::empty())
+        .expect("request");
+    let mut value = b"01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-opaque-".to_vec();
+    value.push(0x80);
+    request.headers_mut().insert(
+        "traceparent",
+        HeaderValue::from_bytes(&value).expect("HTTP obs-text header value"),
+    );
+
+    let response = app.oneshot(request).await.expect("response");
+    let body = to_bytes(response.into_body(), 1_024).await.expect("body");
+    assert_eq!(body, "obs-text-request|4bf92f3577b34da6a3ce929d0e0e4736");
+    let output = serde_json::to_vec(&capture.records()).expect("records serialize");
+    assert!(
+        !output
+            .windows(b"opaque".len())
+            .any(|window| window == b"opaque")
+    );
+    assert!(!output.contains(&0x80));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -97,4 +177,56 @@ async fn duplicate_traceparent_is_untrusted_and_falls_back_to_request_id() {
     let response = app.oneshot(request).await.expect("response");
     let body = to_bytes(response.into_body(), 1_024).await.expect("body");
     assert_eq!(body, "request-only|request-only");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aws_and_azure_profiles_omit_duplicate_traceparent_correlation() {
+    for convention in [FieldConvention::Aws, FieldConvention::Azure] {
+        let config = ObservabilityConfig::default()
+            .with_field_convention(convention)
+            .with_trace_context_level(TraceContextLevel::Level2);
+        let capture = Capture::default();
+        let _guard = subscriber(&config, capture.clone()).set_default();
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async {
+                    tracing::info!(event = "trace", "handler");
+                    StatusCode::OK
+                }),
+            )
+            .layer(ObservabilityLayer::new(config));
+        let mut request = Request::builder()
+            .uri("/")
+            .header("x-request-id", "duplicate-trace")
+            .body(Body::empty())
+            .expect("request");
+        for value in [
+            "00-4efaaf4d1e8720b39541901950019ee5-00f067aa0ba902b7-03",
+            "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+        ] {
+            request
+                .headers_mut()
+                .append("traceparent", HeaderValue::from_str(value).expect("header"));
+        }
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        for record in capture.records() {
+            assert_eq!(record["request_id"], "duplicate-trace");
+            assert_eq!(record["correlation_id"], "duplicate-trace");
+            for key in [
+                "trace_id",
+                "parent_id",
+                "trace_flags",
+                "trace_sampled",
+                "trace_id_random",
+                "xray_trace_id",
+                "operation_Id",
+                "operation_ParentId",
+            ] {
+                assert!(record.get(key).is_none(), "{convention:?} emitted {key}");
+            }
+        }
+    }
 }

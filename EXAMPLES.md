@@ -77,11 +77,13 @@ when the request span is enabled. The access record also includes a structured
 Representative GCP fields:
 
 ```json
-{"severity":"INFO","message":"request completed","request_id":"demo-123","correlation_id":"4bf92f3577b34da6a3ce929d0e0e4736","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace_sampled":true,"method":"GET","path":"/health","path_template":"/health","status":200}
+{"severity":"INFO","message":"request completed","request_id":"demo-123","correlation_id":"4bf92f3577b34da6a3ce929d0e0e4736","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace":"4bf92f3577b34da6a3ce929d0e0e4736","logging.googleapis.com/trace_sampled":true,"method":"GET","path_template":"/health","operation_id":"health_check","status":200,"httpRequest":{"requestMethod":"GET","status":200}}
 ```
 
 The crate does not create spans for a tracing backend and therefore does not
 manufacture `logging.googleapis.com/spanId` from the incoming parent ID.
+Raw path, direct peer IP, and user agent capture are independent opt-ins and
+remain absent in this default example; GCP selection does not enable them.
 
 ## Provider-neutral JSON
 
