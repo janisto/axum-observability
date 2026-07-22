@@ -136,3 +136,17 @@ jobs:
             target/llvm-cov/html
           if-no-files-found: error
           retention-days: 7
+
+  e2e-image:
+    name: E2E consumer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install just
+        uses: extractions/setup-just@v4.0.0
+      - name: Build E2E consumer image
+        run: just e2e-image observability-e2e-local:ci

@@ -66,6 +66,10 @@ deny:
 audit:
     cargo audit
 
+[group('package')]
+e2e-image image_tag:
+    docker build --file e2e/Dockerfile --tag "{{ image_tag }}" .
+
 [group('qa')]
 workflow-check:
     actionlint

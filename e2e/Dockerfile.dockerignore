@@ -1,0 +1,6 @@
+.git
+.github
+plans
+coverage.lcov
+target
+e2e/target
