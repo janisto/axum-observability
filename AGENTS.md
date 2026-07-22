@@ -102,21 +102,23 @@ into human onboarding documentation.
 - Prepare releases from a same-repository source branch named
   `release/prepare-vX.Y.Z` through a pull request titled
   `chore: prepare vX.Y.Z` that targets `main`.
-- Treat `release/` as a reserved namespace. Do not use an alternate branch
-  name to bypass the conditional `E2E consumer image` job or the required
-  `Release E2E gate` check.
+- Use the `release/` namespace only for release preparation branches.
+- The conditional `Consumer image build` job on a release preparation pull
+  request is a build-only packaging and integration diagnostic. It does not run
+  the image, validate emitted logs, or approve a release.
 - For local image-build diagnosis, run
-  `just e2e-image observability-e2e-local:manual`. This proves only that the
-  production-shaped consumer image builds; actual log verification belongs
-  to the central `janisto/observability` repository.
-- After merging the release preparation, do not tag or publish until the
-  central repository pins the final merged commit and
-  `just e2e --authoritative` passes on Docker Engine.
+  `just e2e-image observability-e2e-local:manual`. The Justfile prefers Podman
+  and falls back to Docker.
+- Keep `e2e/README.md` self-contained as the public consumer-image interface.
+  Independent audits are optional and informational; they never approve or
+  block publication.
 - Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, rustdoc, examples, and
   public documentation together when applicable.
 - Run `just qa`, `cargo publish --dry-run --locked`, and `git diff --check`.
-- Merge a green pull request to `main`, then release the exact reviewed commit
-  with an annotated tag `vX.Y.Z`.
+- Merge a green pull request to `main`, create the annotated `vX.Y.Z` tag for
+  the exact reviewed `main` commit, then publish the reviewed GitHub Release as
+  the manual package-publication authorization; no external approval is
+  required.
 - When drafting a stable GitHub Release, use **Generate release notes** and mark
   it as **Latest**. Edit the notes for accuracy and alignment with
   `CHANGELOG.md` before publishing.

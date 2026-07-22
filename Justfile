@@ -1,5 +1,7 @@
 set shell := ["bash", "-ceu"]
 
+CONTAINER_RUNTIME := if `command -v podman 2>/dev/null || true` != "" { "podman" } else { "docker" }
+
 @_:
     just --list
 
@@ -68,7 +70,7 @@ audit:
 
 [group('package')]
 e2e-image image_tag:
-    docker build --file e2e/Dockerfile --tag "{{ image_tag }}" .
+    {{ CONTAINER_RUNTIME }} build --file e2e/Dockerfile --tag "{{ image_tag }}" .
 
 [group('qa')]
 workflow-check:

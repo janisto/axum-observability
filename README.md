@@ -29,8 +29,10 @@ to find and understand.
 
 Field conventions map the same contract to provider-oriented fields without
 coupling application code to a cloud SDK. The crate focuses on structured
-logging and request correlation: it does not create spans for a tracing
-backend, configure OpenTelemetry, export metrics, or ship logs.
+logging and request correlation: it does not create or export distributed
+tracing spans, configure OpenTelemetry, export metrics, or ship logs. It uses
+an internal request span only to attach validated correlation fields to
+application events.
 
 ## Why newline-delimited JSON
 
@@ -82,7 +84,7 @@ Version 2.0.0 is the clean contract described by this checkout. Version 1
 remains available for applications that need its API, defaults, or structured
 fields; v2 provides no compatibility aliases for those surfaces.
 
-## GCP setup
+## Complete setup
 
 When this documentation shows one configuration, it uses GCP. Complete
 provider-neutral, GCP, AWS, and Azure configuration examples are available in
@@ -223,7 +225,7 @@ request ID. The incoming parent ID belongs to the caller. The crate does not
 claim it as a span created by this service, manufacture a current span ID, or
 mutate outbound trace headers.
 
-## Log contract
+## Structured log contract
 
 Every JSON event produced by `JsonLayer` contains `timestamp`, `target`, and
 `level` (`severity` on GCP). GCP maps `TRACE` and `DEBUG` to `DEBUG`, and `WARN`
@@ -248,7 +250,7 @@ semantic fields are:
 | `trace_id`, `parent_id` | string | Only with valid W3C context |
 | `trace_flags` | string | Only with valid W3C context; exactly two lowercase hexadecimal characters |
 | `trace_sampled` | boolean | Only with valid W3C context |
-| `trace_id_random` | boolean | Only with valid W3C context in configured Level 2 mode |
+| `trace_id_random` | boolean | Only with valid version-`00` W3C context in configured Level 2 mode |
 | `method` | string | Always; HTTP method |
 | `path_template` | string | When Axum's `MatchedPath` is available |
 | `path` | string | Only with `with_raw_path(true)`; exact nonempty query-free `http::Uri` path, including `*` |
@@ -265,13 +267,13 @@ Normal completion omits `terminal_reason`; abnormal records do not invent an
 `ERROR` for every abnormal terminal reason or a normal 5xx, `WARN` for a
 normal 4xx, and `INFO` otherwise. The status-level mapper applies only to
 normal completion. Application events cannot replace package correlation,
-envelope, selected-profile provider-alias, or internal-control fields.
-Access-only names, exact aliases owned only by an inactive provider profile,
-other unowned provider fields, and names that merely use an `obs.` or `_obs_`
-prefix remain ordinary application data. Access enrichment cannot replace exact
-terminal access fields; package-owned fields win without reserving speculative
-namespaces. Application `error` fields remain native application data and are
-not synthesized on access lines.
+envelope, provider aliases owned by the active field convention, or
+internal-control fields. Access-only names, aliases owned only by an inactive
+field convention, other unowned provider fields, and names that merely use an
+`obs.` or `_obs_` prefix remain ordinary application data. Access enrichment
+cannot replace exact terminal access fields; package-owned fields win without
+reserving speculative namespaces. Application `error` fields remain native
+application data and are not synthesized on access lines.
 
 `path_template` is the default low-cardinality aggregation key. Concrete `path`
 can have unbounded cardinality and may contain identifying data, so it is off by
@@ -330,7 +332,7 @@ Google Cloud's current [preferred trace field
 format](https://docs.cloud.google.com/trace/docs/trace-log-integration) is the
 bare trace ID.
 
-## Response and failure behavior
+## Diagnostics and failure boundaries
 
 The body wrapper owns a one-shot terminal guard:
 
@@ -426,24 +428,28 @@ data, and secrets out of those values.
 | GCP trace link is absent | `traceparent` is missing or invalid | Send one valid lowercase W3C `traceparent`; do not provide a project-qualified value |
 | Duplicate framework access lines | Another access logger remains enabled | Disable the competing access logger when this crate owns terminal records |
 
-## Compatibility and development
+## Compatibility
 
 The crate supports Rust 1.97.0 or newer and the Axum 0.8 release line. The
 public `ObservabilityService` is the nameable Tower service produced by
-`ObservabilityLayer`. In the 1.x release line, exported APIs, configuration
-defaults, structured fields, and supported runtime versions are compatibility
-contracts. Breaking changes require a new major version, explicit changelog
-coverage, and migration guidance.
+`ObservabilityLayer`. Within each major release line, exported APIs,
+configuration defaults, structured fields, and supported runtime versions are
+Semantic Versioning contracts. Breaking changes require a new major version,
+explicit changelog coverage, and migration guidance.
 
-The current Unreleased schema and callback changes are reserved for `2.0.0`;
-see the changelog migration section before upgrading a 1.x application.
-Version 2 exposes no v1 constructor aliases or compatibility shims. Build both
-the middleware and JSON formatter from one `ObservabilityConfig`.
+Version 2 intentionally removes v1 compatibility shims and changes the
+request-ID validator, trace-context, and formatter-construction APIs. Read the
+[migration guidance](CHANGELOG.md#migration-from-1x) before upgrading. Build
+both the middleware and JSON formatter from one `ObservabilityConfig`.
 
-Development uses [just](https://github.com/casey/just). The normal gates are:
+## Development and validation
+
+Development uses [just](https://github.com/casey/just). On Homebrew, install the
+system prerequisites and repository tools before running validation:
 
 ```bash
-brew install rust llvm actionlint zizmor
+brew install just rust llvm actionlint zizmor
+just install
 ```
 
 The Homebrew Rust and LLVM versions must match. The coverage recipes detect an
@@ -455,8 +461,9 @@ just qa
 ```
 
 `just qa` runs formatting, Clippy with warnings denied, tests, doctests,
-dependency policy, the RustSec audit, [actionlint](https://github.com/rhysd/actionlint),
-and [zizmor](https://docs.zizmor.sh/). Maintainers should follow the public
+dependency policy, the RustSec audit,
+[actionlint](https://github.com/rhysd/actionlint), and
+[zizmor](https://docs.zizmor.sh/). Maintainers should follow the public
 [release architecture and guide](RELEASE.md).
 
 ## Property and mutation testing
@@ -472,6 +479,18 @@ just mutation
 Mutation testing runs outside `just qa`. Add a behavioral test when a surviving
 mutant exposes a real contract gap. Equivalent transformations do not need
 artificial assertions.
+
+## Consumer image
+
+Run `just e2e-image observability-e2e-local:manual` to build a
+production-shaped consumer image from the exact checkout. The recipe prefers
+Podman and falls back to Docker.
+
+Building the image verifies packaging and integration only. It does not run the
+image, validate emitted logs, compare implementations, or approve a release.
+Optional independent tooling may exercise the public contract documented in
+[`e2e/README.md`](e2e/README.md). Any audit result is informational and is never
+a publication requirement.
 
 ## References
 

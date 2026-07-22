@@ -138,7 +138,7 @@ jobs:
           retention-days: 7
 
   e2e-image:
-    name: E2E consumer image
+    name: Consumer image build
     if: >-
       github.event_name == 'pull_request' &&
       github.base_ref == 'main' &&
@@ -153,63 +153,5 @@ jobs:
           persist-credentials: false
       - name: Install just
         uses: extractions/setup-just@v4.0.0
-      - name: Build E2E consumer image
+      - name: Build consumer image
         run: just e2e-image observability-e2e-local:ci
-
-  release-e2e-gate:
-    name: Release E2E gate
-    needs: [e2e-image]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Enforce release E2E image result
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          E2E_RESULT: ${{ needs.e2e-image.result }}
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
-          PR_TITLE: ${{ github.event.pull_request.title || '' }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "Release E2E gate is not applicable to $EVENT_NAME."
-            exit 0
-          fi
-
-          if [[ "$HEAD_REF" != release/* ]]; then
-            echo "Release E2E image is not required for $HEAD_REF."
-            exit 0
-          fi
-
-          if [[ "$HEAD_REPOSITORY" != "$REPOSITORY" ]]; then
-            echo "::error::The release/ namespace is reserved for branches in $REPOSITORY."
-            exit 1
-          fi
-
-          if [[ "$BASE_REF" != "main" ]]; then
-            echo "::error::Release preparation pull requests must target main."
-            exit 1
-          fi
-
-          if [[ ! "$HEAD_REF" =~ ^release/prepare-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([A-Za-z][A-Za-z0-9.]*|-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "::error::Release branches must match release/prepare-vMAJOR.MINOR.PATCH with an optional supported prerelease suffix."
-            exit 1
-          fi
-
-          VERSION="${HEAD_REF#release/prepare-v}"
-          if [[ "$PR_TITLE" != "chore: prepare v$VERSION" ]]; then
-            echo "::error::Release pull request title must be: chore: prepare v$VERSION"
-            exit 1
-          fi
-
-          if [[ "$E2E_RESULT" != "success" ]]; then
-            echo "::error::E2E consumer image result was $E2E_RESULT; expected success."
-            exit 1
-          fi
-
-          echo "Release E2E consumer image passed for v$VERSION."

@@ -24,8 +24,6 @@ The changes in this section target `2.0.0` and must not be published on the
 - Read accepted `TraceContext::traceparent()` values as optional UTF-8 and use
   `traceparent_bytes()` when an opaque future-version suffix can contain raw
   HTTP `obs-text`.
-- A fallible custom generator is invoked once before the crate-owned fallback,
-  so one replacement request cannot duplicate generator side effects.
 - Replace `JsonLayer::new(writer, convention)` with
   `ObservabilityConfig::json_layer(writer)`. Version 2 has no direct-constructor
   compatibility shim. Finalize one configuration before constructing the JSON
@@ -34,60 +32,51 @@ The changes in this section target `2.0.0` and must not be published on the
 
 ### Added
 
-- Added GCP, AWS, and Azure provider field conventions.
 - Added typed W3C Trace Context Level 1/Level 2 configuration, with Level 1 as
   the default and Level 2 random trace-ID flag projection.
+- Added a conditional consumer-image build as a packaging and integration
+  diagnostic, with Podman-first local builds and Docker fallback. Optional
+  independent audits are informational and never a publication requirement.
 
 ### Changed
 
-- Removed the v1 direct JSON-layer constructor so v2 exposes one config-owned
-  JSON-layer construction path; callers must finalize and reuse the same
-  unchanged configuration for middleware coherence.
-- Set crate and lock metadata to `2.0.0` so Cargo validation cannot package the
-  breaking v2 surface under the v1 version.
-- Documented LF-terminated NDJSON as the writer boundary and strengthened raw
-  framing coverage for independently parseable records.
-
-- Aligned the GCP health example and integration fixture with privacy-safe
-  request metadata, the shared `1.0.0` fixture value, stable `health_check`
-  operation identity, and deterministic DEBUG/INFO output.
 - Aligned correlation output with string `trace_flags`, selected-level
   `tracestate` grammar including empty members, conditional `trace_id_random`,
   and integer serialization for exact whole-millisecond durations.
 - Classified `response_dropped` as an abnormal `ERROR` outcome regardless of
   committed status or the normal-response status mapper.
-- Trust nonempty Axum `MatchedPath` as authoritative framework route metadata,
-  including literal-star static routes.
-- Stop synthesizing fixed `error` summaries for body and service failures.
-  Authenticate package access payloads by their internal callsite and preserve
-  ordinary application fields outside the exact package-owned set.
+- Stopped synthesizing fixed `error` summaries for body and service failures.
+  Application logging retained ownership of error details.
+
+### Removed
+
+- Removed the public `JsonLayer::new` constructor. Version 2 exposes only the
+  configuration-owned `ObservabilityConfig::json_layer` construction path.
 
 ### Fixed
 
-- Serialize each complete formatter record across partial writer calls so
-  concurrent events cannot interleave, and authenticate request-span metadata
-  by the package callsite before accepting correlation fields.
-- Protect exact package-owned fields contextually: application events can use
-  access-only fields, exact aliases owned only by an inactive provider profile,
-  and other non-owned provider-looking fields, while access enrichment cannot
-  replace exact terminal fields. Speculative namespace prefixes are no longer
-  reserved.
-- Emit GCP `httpRequest.latency` with canonical ProtoJSON fractional widths:
-  0, 3, 6, or 9 digits according to the required precision.
-- Apply the RFC 9110 field-content boundary before custom request-ID validation,
-  admitting internal space, tab, or a comma in one field-line; direct synthetic
-  edge-whitespace values remain a native safety check after real HTTP parsing.
-- Preserve framework-valid route metadata, HTTP-safe opaque future
-  `traceparent` suffixes—including raw `obs-text`—without an invented length
-  cap, valid `tracestate` beyond 512 characters, HTAB User-Agent values,
-  custom-admitted request IDs, and nonempty static operation IDs.
-- Preserve portable duration across conventions and omit only an
-  unrepresentable GCP latency projection.
-
-- Preserve every nonempty query-free path component exposed by `http::Uri`,
-  including malformed percent forms and the asterisk form, without applying a
-  second adapter grammar.
-- Preserve sampling while omitting the Level 2 random flag for unknown future
+- Serialized each formatter event as one LF-terminated record while holding a
+  record lock across writer creation and partial writes, so concurrent events
+  cannot interleave.
+- Prevented application events from forging request correlation or terminal
+  access payloads while preserving fields outside the active contract:
+  access-only fields, aliases owned only by an inactive field convention,
+  other non-owned provider-looking fields, and speculative namespace prefixes
+  remain application data; access enrichment cannot replace exact terminal
+  fields.
+- Emitted GCP `httpRequest.latency` across the full representable ProtoJSON
+  duration range with canonical 0, 3, 6, or 9 fractional digits, while
+  preserving portable `duration_ms` when the provider projection is
+  unrepresentable.
+- Applied the RFC 9110 field-content boundary before custom request-ID
+  validation, admitting internal space, tab, or a comma in one field-line;
+  direct synthetic edge-whitespace values remained a native safety check after
+  real HTTP parsing.
+- Preserved HTTP-safe opaque future `traceparent` suffixes—including raw
+  `obs-text`—without an invented length cap, valid `tracestate` beyond 512
+  characters, HTAB User-Agent values, custom-admitted request IDs, and
+  nonempty static operation IDs.
+- Preserved sampling while omitting the Level 2 random flag for unknown future
   `traceparent` versions.
 
 ## [1.0.0] - 2026-07-17
