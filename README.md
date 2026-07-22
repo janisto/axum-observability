@@ -488,9 +488,9 @@ Podman and falls back to Docker.
 
 Building the image verifies packaging and integration only. It does not run the
 image, validate emitted logs, compare implementations, or approve a release.
-Optional independent tooling may exercise the public contract documented in
-[`e2e/README.md`](e2e/README.md). Any audit result is informational and is never
-a publication requirement.
+Optional independent tooling may exercise the package's documented public
+contract. Any audit result is informational and is never a publication
+requirement.
 
 ## References
 
