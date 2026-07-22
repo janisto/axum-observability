@@ -464,7 +464,7 @@ just qa
 dependency policy, the RustSec audit,
 [actionlint](https://github.com/rhysd/actionlint), and
 [zizmor](https://docs.zizmor.sh/). Maintainers should follow the public
-[release architecture and guide](RELEASE.md).
+[release architecture and guide](https://github.com/janisto/axum-observability/blob/main/RELEASE.md).
 
 ## Property and mutation testing
 
