@@ -108,11 +108,48 @@ same commit passed pull-request CI. Hosted PR checks prove the reviewed source;
 release checks prove the immutable version/tag relationship and package at the
 publication boundary.
 
+## Release preparation branch and E2E gates
+
+Every release preparation uses a same-repository source branch named
+`release/prepare-vX.Y.Z`, targets `main`, and uses the pull request title
+`chore: prepare vX.Y.Z`. The branch and title versions must agree with the
+version being released. When this repository permits a prerelease, use its
+exact reviewed prerelease suffix in both the branch and title. The `release/`
+namespace is reserved for this process;
+a release branch from a fork, a different target, or a malformed name fails
+the gate.
+
+The CI workflow separates two checks:
+
+- `E2E consumer image` runs only for a valid release preparation pull request
+  and builds the production-shaped consumer with
+  `just e2e-image observability-e2e-local:ci`.
+- `Release E2E gate` reports on every pull request. It passes as not applicable
+  for an ordinary branch, but for `release/` it succeeds only when the branch,
+  title, repository, target, and image-build result are valid.
+
+Require `Release E2E gate` in the `main` ruleset; do not require the conditional
+`E2E consumer image` job. Land the workflow on `main` and let the gate report
+once before adding its exact check name to the ruleset. Preserve every existing
+required check. For local image diagnosis, run:
+
+```bash
+just e2e-image observability-e2e-local:manual
+```
+
+The sibling image job proves only that the consumer image builds. It does not
+verify actual log output. After the release preparation merges, stop before
+creating a tag or publishing a GitHub Release. Update this sibling's revision
+in the central [`janisto/observability`](https://github.com/janisto/observability)
+repository to the final merged `main` commit, then follow its `RELEASE.md` and
+run the complete `just e2e --authoritative` matrix on Docker Engine from clean,
+pinned checkouts. Tag and publish only after that central result passes.
+
 ## Maintainer release guide
 
 ### 1. Prepare the version
 
-Create a normal review branch and:
+Create `release/prepare-vX.Y.Z` from the current `main` branch and:
 
 1. update `Cargo.toml#package.version`;
 2. refresh `Cargo.lock` through Cargo when the package metadata requires it;
@@ -145,7 +182,9 @@ doctests, dependency policy, the RustSec audit, actionlint, and
 Cargo's standard package and publication validation without uploading the
 crate.
 
-Merge the release preparation through a green pull request to `main`.
+Merge the release preparation through a green pull request only after
+`Release E2E gate` passes. Complete the central authoritative gate described
+above before proceeding to the next publication step.
 
 ### 3. Create the annotated tag and draft release
 
