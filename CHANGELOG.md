@@ -6,8 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-The changes in this section target `2.0.0` and must not be published on the
-`1.x` release line.
+## [2.0.0] - 2026-07-22
 
 ### Migration from 1.x
 
@@ -136,7 +135,8 @@ The changes in this section target `2.0.0` and must not be published on the
   configure Trusted Publishing. This version intentionally exposed no
   middleware API.
 
-[Unreleased]: https://github.com/janisto/axum-observability/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/janisto/axum-observability/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/janisto/axum-observability/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/janisto/axum-observability/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/janisto/axum-observability/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janisto/axum-observability/compare/v0.1.0...v0.2.0
