@@ -18,11 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@v0.6.0
+        uses: zizmorcore/zizmor-action@v0.6.4
         with:
           advanced-security: false
