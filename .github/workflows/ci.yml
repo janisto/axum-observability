@@ -20,7 +20,7 @@ jobs:
     name: Format, manifest, Clippy, and rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
@@ -43,7 +43,7 @@ jobs:
     name: Tests and doctests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.97.0 --profile minimal
@@ -61,7 +61,7 @@ jobs:
     name: Dependency policy and audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.97.0 --profile minimal
@@ -82,7 +82,7 @@ jobs:
     name: Direct minimum dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install nightly-2026-07-16 --profile minimal
@@ -94,7 +94,7 @@ jobs:
     name: Public external types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install nightly-2026-03-20 --profile minimal
@@ -114,7 +114,7 @@ jobs:
     name: Source coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.97.0 --profile minimal --component llvm-tools-preview
@@ -148,7 +148,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install just
